@@ -42,19 +42,40 @@ Download processed files.
 ### `GET /api/health`
 Health check endpoint.
 
-## Setup and Installation
+## Setup and Installation (Updated)
 
-1. Install dependencies:
+This backend is a Flask API used by the frontend. The main enhanced entry point is `enhanced_dexa_api.py`.
+
+1. Create and activate a virtual environment (recommended):
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+2. Install dependencies:
+
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Run the API:
+3. Run the enhanced API server:
+
 ```bash
-python dexa_api.py
+python enhanced_dexa_api.py
 ```
 
-3. Access at: http://localhost:5000
+By default the service runs on `http://localhost:5001` and writes exported CSVs to `../frontend/exports` (relative to this folder).
+
+### Example upload (curl)
+```bash
+curl -F "files=@/path/to/sample.csv" http://localhost:5001/api/process-dexa
+```
+
+### Notes
+- The API supports `.txt`, `.csv`, `.xlsx/.xls`, `.pdf` (optional), and common image formats.
+- If you see `No valid files processed` in the response, check the backend logs printed to the terminal — parsing errors are logged there.
+- Use `/api/download/<filename>` to retrieve exported files (the frontend uses this endpoint).
 
 ## Input File Format
 

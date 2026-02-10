@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="description" content="DEXA Data Visualization">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DEXA Data Visualization</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+
+    <div class="container">
+        <h1>DEXA Data Visualization</h1>
+
+        <!-- Filter Controls -->
+        <div id="filter-controls">
+            <label for="filterType"><strong>Filter by:</strong></label>
+            <select id="filterType">
+                <option value="all">All</option>
+            </select>
+
+            <label for="filterMin">Min:</label>
+            <input type="number" id="filterMin" step="0.1">
+            <label for="filterMax">Max:</label>
+            <input type="number" id="filterMax" step="0.1">
+            <button type="button" id="applyFilterBtn">Apply Filter</button>
+            <button type="button" id="resetFilterBtn">Reset</button>
+        </div>
+
+        <!-- Link Buttons -->
+        <div class="link-buttons">
+            <button type="button" id="dexa-upload-btn">Back to Uploader</button>
+        </div>
+
+        <div id="chart-area"></div>
+        <!-- Slide-in Data Panel -->
+        <div id="data-panel">
+            <div id="panel-content">
+                <span id="close-panel">&times;</span>
+                <div id="data-content"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- JS dependencies -->
+    <script src="js/jquery-3.6.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.1/dist/umd/popper.min.js"></script>
+    <script src="js/bootstrap/bootstrap.bundle.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+
+    <script>
+        // Get CSV filename from URL parameter
+        const urlParams = new URLSearchParams(window.location.search);
+        const csvFile = urlParams.get('file');
+
+        if (!csvFile) {
+            document.body.innerHTML = '<div class="loading">No data file specified. Please upload data first.</div>';
+        } else {
+            loadAndVisualize(csvFile);
+        }
+
+        let width = window.innerWidth;
+        let height = window.innerHeight - 120;
+
+        const container = d3.select("#chart-area");
+        const svg = container
+            .append("svg")
+            .attr("width", width)
+            .attr("height", height)
+            .attr("viewBox", [0, 0, width, height])
+            .attr("preserveAspectRatio", "xMidYMid meet");
+
+        window.addEventListener("resize", () => {
+            width = window.innerWidth;
+            height = window.innerHeight - 120;
+            svg.attr("width", width).attr("height", height);
+        });
+
+        function loadAndVisualize(filename) {
+            d3.csv(`/api/download/${filename}`).then(data => {
+                if (!data || data.length === 0) {
+                    throw new Error("No data loaded");
+                }
+
+                data.forEach(d => {
+                    Object.keys(d).forEach(key => {
+                        const val = parseFloat(d[key]);
+                        if (!isNaN(val) && d[key] !== '') {
+                            d[key] = val;
+                        }
+                    });
+                });
+
+                initializeVisualization(data);
+            }).catch(error => {
+                console.error("Error loading data:", error);
+                document.body.innerHTML = `<div class="loading"><div class="error">Error loading data: ${error.message}</div></div>`;
+            });
+        }
+
+        function initializeVisualization(data) {
+            // Build numeric columns list
+            const numericCols = new Set();
+            data.forEach(d => {
+                Object.keys(d).forEach(key => {
+                    if (!isNaN(parseFloat(d[key])) && d[key] !== '') numericCols.add(key);
+                });
+            });
+
+            const filterType = document.getElementById("filterType");
+            numericCols.forEach(col => {
+                const option = document.createElement('option');
+                option.value = col;
+                option.textContent = col;
+                filterType.appendChild(option);
+            });
+
+            // Summary stats
+            const batches = new Set(data.map(d => d.batch || 'Unknown'));
+            const timepoints = new Set(data.map(d => d.timepoint_standardized || d.timepoint || 'Unknown'));
+
+            // Create nodes per subject
+            const subjectMap = new Map();
+            data.forEach((d, i) => {
+                const id = d.subject_id || d.sampleId || `R_${i}`;
+                if (!subjectMap.has(id)) subjectMap.set(id, { ...d, subject_id: id });
+                else {
+                    const exist = subjectMap.get(id);
+                    Object.keys(d).forEach(k => { if (!exist[k] && typeof d[k] === 'number') exist[k] = d[k]; });
+                }
+            });
+
+            const nodes = Array.from(subjectMap.values());
+
+            const relationships = [];
+            const numCols = Array.from(numericCols).slice(0, 5);
+            for (let i = 0; i < nodes.length; i++) {
+                for (let j = i + 1; j < nodes.length; j++) {
+                    let score = 0; let count = 0;
+                    numCols.forEach(col => {
+                        const a = nodes[i][col]; const b = nodes[j][col];
+                        if (typeof a === 'number' && typeof b === 'number') { score += 1 - Math.abs(a - b) / (Math.max(...nodes.map(n => n[col]||0)) - Math.min(...nodes.map(n => n[col]||0)) || 1); count++; }
+                    });
+                    if (count > 0) { score /= count; if (score > 0.7) relationships.push({ source: nodes[i].subject_id, target: nodes[j].subject_id, strength: score }); }
+                }
+            }
+
+            const linkForce = d3.forceLink().id(d => d.subject_id).distance(120).strength(d => d.strength || 0.5);
+            const sim = d3.forceSimulation(nodes).force("link", linkForce.links(relationships)).force("charge", d3.forceManyBody().strength(-200)).force("center", d3.forceCenter(width/2, height/2)).force("collision", d3.forceCollide().radius(30));
+
+            const linkG = svg.append('g').attr('class','links');
+            const nodeG = svg.append('g').attr('class','nodes');
+            const labelG = svg.append('g').attr('class','labels');
+
+            function update(nodesData, linksData) {
+                linkG.selectAll('line').remove(); nodeG.selectAll('circle').remove(); labelG.selectAll('text').remove();
+                const lines = linkG.selectAll('line').data(linksData).join('line').attr('stroke','#bbb').attr('stroke-width',1).attr('opacity',0.6);
+                const circles = nodeG.selectAll('circle').data(nodesData, d=>d.subject_id).join('circle').attr('r',18).attr('fill',d=>{ const colors={'Batch_1':'#667eea','Batch_2':'#764ba2','Batch_3':'#f093fb'}; return colors[d.batch]||'#888';}).attr('stroke','#222').attr('stroke-width',1.5).style('cursor','pointer').on('click',function(e,d){ showPanel(d,d3.select(this)); }).call(d3.drag().on('start',dragstarted).on('drag',dragged).on('end',dragended));
+                const labels = labelG.selectAll('text').data(nodesData, d=>d.subject_id).join('text').attr('text-anchor','middle').attr('dy',4).text(d=>d.subject_id).style('fill','#fff').style('font-size','11px').style('pointer-events','none');
+                linkForce.links(linksData); sim.alpha(1).restart(); sim.on('tick',()=>{ lines.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y).attr('x2',d=>d.target.x).attr('y2',d=>d.target.y); circles.attr('cx',d=>d.x).attr('cy',d=>d.y); labels.attr('x',d=>d.x).attr('y',d=>d.y); });
+            }
+
+            let current = null;
+            function showPanel(d,nodeSel){ const content = document.getElementById('data-content'); let html = `<h3>${d.subject_id}</h3><table>`; Object.keys(d).forEach(k=>{ if (k==='subject_id') return; html+=`<tr><td>${k}</td><td>${typeof d[k]==='number'?d[k].toFixed(2):d[k]}</td></tr>`}); html+='</table>'; content.innerHTML = html; document.getElementById('data-panel').classList.add('active'); if (current && current.node() !== nodeSel.node()) { current.transition().attr('r',18).attr('stroke-width',1.5);} current = nodeSel; nodeSel.transition().attr('r',26).attr('stroke-width',3); }
+
+            function dragstarted(event,d){ if (!event.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; }
+            function dragged(event,d){ d.fx=event.x; d.fy=event.y; }
+            function dragended(event,d){ if (!event.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }
+
+            document.getElementById('applyFilterBtn').addEventListener('click',()=>{ const metric=document.getElementById('filterType').value; const min=parseFloat(document.getElementById('filterMin').value); const max=parseFloat(document.getElementById('filterMax').value); if (metric==='all'){ update(nodes,relationships); return;} const filtered = nodes.filter(n=>{ const v=n[metric]; if (typeof v!=='number') return false; if (!isNaN(min)&&v<min) return false; if (!isNaN(max)&&v>max) return false; return true; }); const rels = relationships.filter(r=> filtered.some(n=>n.subject_id===r.source) && filtered.some(n=>n.subject_id===r.target)); update(filtered,rels); });
+
+            document.getElementById('resetFilterBtn').addEventListener('click',()=>{ document.getElementById('filterType').value='all'; document.getElementById('filterMin').value=''; document.getElementById('filterMax').value=''; document.getElementById('data-panel').classList.remove('active'); update(nodes, relationships); });
+
+            document.getElementById('close-panel').addEventListener('click',()=>{ document.getElementById('data-panel').classList.remove('active'); if (current){ current.transition().attr('r',18).attr('stroke-width',1.5); current=null;} });
+
+            // Back to uploader button (navigate to root/upload page)
+            document.getElementById('dexa-upload-btn').addEventListener('click', ()=>{ window.location.href = '/'; });
+
+            update(nodes, relationships);
+        }
+    </script>
+
+</body>
+
+</html>

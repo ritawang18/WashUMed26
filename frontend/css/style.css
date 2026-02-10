@@ -194,6 +194,19 @@ h1 {
 	gap: 10px;
 }
 
+/* layout spacing moved from inline styles */
+#filter-controls {
+	margin: 15px 0;
+}
+
+#filter-controls input[type="number"] {
+	width: 80px;
+}
+
+.link-buttons {
+	margin: 20px 0;
+}
+
 #filter-controls select,
 #filter-controls input,
 #filter-controls button {

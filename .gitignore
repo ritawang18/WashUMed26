@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# Python virtualenvs
+backend/venv/
+.venv/
+
+# Node modules and build artifacts
+frontend/node_modules/
+frontend/exports/
+

@@ -24,26 +24,67 @@ Complete web-based DEXA data processing system with beautiful teal interface, ad
 - **PDF**: `.pdf` documents with table extraction
 - **Images**: `.tif`, `.png`, `.jpeg`, `.bmp` DEXA scans
 
-## 🚀 Quick Start
+## 🚀 Quick Start (Updated)
+
+This project contains a Flask backend and a React-based frontend. Follow these steps to get both running locally.
 
 ### Prerequisites
-- Python 3.9+
-- pip package manager
+- Python 3.9+ (or compatible 3.x)
+- Node.js 16+ and npm
+- Git (for cloning / pushing changes)
 
-### Installation
+### Backend (Flask)
+1. Create and activate a Python virtual environment (recommended):
+
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate   # macOS / Linux
+# .venv\Scripts\activate   # Windows (PowerShell)
+```
 
-# Start the enhanced API server
+2. Install backend dependencies and run the server:
+
+```bash
+pip install -r backend/requirements.txt
 python backend/enhanced_dexa_api.py
 ```
 
-### Usage
-1. **Open Browser**: Navigate to `http://localhost:5001`
-2. **Upload Files**: Drag and drop your DEXA files or click to browse
-3. **Auto-Processing**: Files are automatically cleaned and standardized
-4. **Download Results**: Get clean CSV with comprehensive data quality report
+### Frontend (Development)
+1. Install dependencies and start the dev server:
+
+```bash
+cd frontend
+npm install
+npm start
+```
+
+The React dev server runs on `http://localhost:3000` and proxies API requests to the backend. Ensure `frontend/package.json` contains a proxy entry pointing to `http://localhost:5001` (it should already be updated).
+
+### Production / Static Hosting
+Build the frontend and serve the static `build/` folder behind the Flask app (or any static server):
+
+```bash
+cd frontend
+npm run build
+# Serve contents of frontend/build with your preferred static server
+```
+
+### Where exports go
+Processed CSVs are saved to `frontend/exports` by default. The backend response includes `csv_download_url` and `csv_filename`. The visualization page loads files from `/api/download/<filename>` and can be opened at:
+
+`http://localhost:3000/visualization.html?file=<csv_filename>` (dev server) or
+`http://<your-host>/visualization.html?file=<csv_filename>` when served statically.
+
+
+### Committing & Pushing Changes
+Once you've made edits, commit and push (example):
+
+```bash
+git add .
+git commit -m "Update README and frontend/backend fixes"
+git push origin your-branch
+```
+
 
 ## 📁 Project Structure
 
@@ -95,24 +136,3 @@ python backend/enhanced_dexa_api.py
 - **Consistency Score**: Standardization success rate
 - **Overall Quality Score**: Weighted composite metric
 
-## 🤝 Team Collaboration
-This enhanced system provides a complete solution for DEXA data processing with both simplified and advanced interfaces for different user needs.
-
----
-
-## Project History
-
-### 09/21/2025 Meeting Notes
-1. Andrew & Hans: data cleaning and imputation, Hans look into categorizing data based on column category
-2. Rita & I: learn how to use Spanner for data mapping and then find an alternative to Notebook LLM to visualize mapped data
-3. Push any and all work into a branch by Saturday noon
-4. Setting a check in schedule with Patrick
-5. Setting a subgroup weekly meeting scheduleumed
-2025 WashU Med Application
-
-# 09/21/2025
-1. Andrew & Hans (looks done!): data cleaning and imputation, Hans look into categorizing data based on column category
-2. Rita & I (halfway there!): Visualize the data with sample pieces form the csv fil into a node map and then get started on mapping form cleaned data
-3. Push any and all work into a branch by Saturday noon (done!)
-4. Setting a check in schedule with Patrick (@christien is it possible to add him to this slack Channel) (done!)
-5. Setting a subgroup weekly meeting schedule- will address after this week (I’ll be present at both to make sure any potential problems get written up or questions get addressed)

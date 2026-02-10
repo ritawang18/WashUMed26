@@ -48,7 +48,7 @@ const DexaUploader = () => {
 
         try {
             // Using our own API implementation
-            const response = await fetch('http://localhost:5002/api/process-dexa', {
+            const response = await fetch('/api/process-dexa', {
                 method: 'POST',
                 body: formData
             });
@@ -58,6 +58,7 @@ const DexaUploader = () => {
             }
             
             const data = await response.json();
+            console.log('Process response:', data);
             setResult(data);
         } catch (error) {
             console.error('Upload failed:', error);
@@ -71,6 +72,13 @@ const DexaUploader = () => {
         setFiles([]);
         setResult(null);
     };
+
+        const goToVisualization = (csvUrlOrFilename) => {
+            // Accept either full URL or filename
+            if (!csvUrlOrFilename) return;
+            const filename = csvUrlOrFilename.includes('/') ? csvUrlOrFilename.split('/').pop() : csvUrlOrFilename;
+            window.location.href = `/visualization.html?file=${filename}`;
+        };
 
     return (
         <div className="dexa-uploader">
@@ -201,6 +209,16 @@ const DexaUploader = () => {
                                     >
                                         📈 Download Excel Analysis
                                     </a>
+                                )}
+
+                                {/* Show visualization button when CSV URL is available */}
+                                {result.csv_download_url && (
+                                    <button
+                                        onClick={() => goToVisualization(result.csv_download_url)}
+                                        className="download-btn visualization"
+                                    >
+                                        📊 View Interactive Visualization
+                                    </button>
                                 )}
                             </div>
 
