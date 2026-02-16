@@ -101,6 +101,35 @@
         }
 
         function initializeVisualization(data) {
+            const labelMap = {
+                subject_id: 'Subject ID',
+                batch: 'Batch',
+                gender: 'Gender',
+                timepoint: 'Timepoint',
+                timepoint_standardized: 'Timepoint (Standardized)',
+                total_weight: 'Total Weight (g)',
+                soft_weight: 'Soft Weight (g)',
+                lean_weight: 'Lean Weight (g)',
+                fat_weight: 'Fat Weight (g)',
+                fat_percent: 'Fat Percent (%)',
+                bmc: 'BMC (g)',
+                bmd: 'BMD (mg/cm²)',
+                bone_area: 'Bone Area (cm²)',
+                sample_area: 'Sample Area (cm²)',
+                filename: 'Source File'
+            };
+
+            const preferredMetricOrder = [
+                'total_weight',
+                'lean_weight',
+                'fat_weight',
+                'fat_percent',
+                'bmc',
+                'bmd',
+                'bone_area',
+                'sample_area'
+            ];
+
             // Build numeric columns list
             const numericCols = new Set();
             data.forEach(d => {
@@ -110,10 +139,14 @@
             });
 
             const filterType = document.getElementById("filterType");
-            numericCols.forEach(col => {
+            const orderedMetrics = preferredMetricOrder.filter(col => numericCols.has(col));
+            const remainingMetrics = Array.from(numericCols).filter(col => !orderedMetrics.includes(col));
+            const allMetrics = [...orderedMetrics, ...remainingMetrics];
+
+            allMetrics.forEach(col => {
                 const option = document.createElement('option');
                 option.value = col;
-                option.textContent = col;
+                option.textContent = labelMap[col] || col;
                 filterType.appendChild(option);
             });
 
@@ -135,7 +168,7 @@
             const nodes = Array.from(subjectMap.values());
 
             const relationships = [];
-            const numCols = Array.from(numericCols).slice(0, 5);
+            const numCols = allMetrics.slice(0, 5);
             for (let i = 0; i < nodes.length; i++) {
                 for (let j = i + 1; j < nodes.length; j++) {
                     let score = 0; let count = 0;
@@ -157,13 +190,13 @@
             function update(nodesData, linksData) {
                 linkG.selectAll('line').remove(); nodeG.selectAll('circle').remove(); labelG.selectAll('text').remove();
                 const lines = linkG.selectAll('line').data(linksData).join('line').attr('stroke','#bbb').attr('stroke-width',1).attr('opacity',0.6);
-                const circles = nodeG.selectAll('circle').data(nodesData, d=>d.subject_id).join('circle').attr('r',18).attr('fill',d=>{ const colors={'Batch_1':'#667eea','Batch_2':'#764ba2','Batch_3':'#f093fb'}; return colors[d.batch]||'#888';}).attr('stroke','#222').attr('stroke-width',1.5).style('cursor','pointer').on('click',function(e,d){ showPanel(d,d3.select(this)); }).call(d3.drag().on('start',dragstarted).on('drag',dragged).on('end',dragended));
+                const circles = nodeG.selectAll('circle').data(nodesData, d=>d.subject_id).join('circle').attr('r',18).attr('fill',d=>{ const colors={'Batch_1':'#667eea','Batch_2':'#764ba2','Batch_3':'#f093fb','Batch_4':'#00bcd4','Batch_5':'#26a69a'}; return colors[d.batch]||'#888';}).attr('stroke','#222').attr('stroke-width',1.5).style('cursor','pointer').on('click',function(e,d){ showPanel(d,d3.select(this)); }).call(d3.drag().on('start',dragstarted).on('drag',dragged).on('end',dragended));
                 const labels = labelG.selectAll('text').data(nodesData, d=>d.subject_id).join('text').attr('text-anchor','middle').attr('dy',4).text(d=>d.subject_id).style('fill','#fff').style('font-size','11px').style('pointer-events','none');
                 linkForce.links(linksData); sim.alpha(1).restart(); sim.on('tick',()=>{ lines.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y).attr('x2',d=>d.target.x).attr('y2',d=>d.target.y); circles.attr('cx',d=>d.x).attr('cy',d=>d.y); labels.attr('x',d=>d.x).attr('y',d=>d.y); });
             }
 
             let current = null;
-            function showPanel(d,nodeSel){ const content = document.getElementById('data-content'); let html = `<h3>${d.subject_id}</h3><table>`; Object.keys(d).forEach(k=>{ if (k==='subject_id') return; html+=`<tr><td>${k}</td><td>${typeof d[k]==='number'?d[k].toFixed(2):d[k]}</td></tr>`}); html+='</table>'; content.innerHTML = html; document.getElementById('data-panel').classList.add('active'); if (current && current.node() !== nodeSel.node()) { current.transition().attr('r',18).attr('stroke-width',1.5);} current = nodeSel; nodeSel.transition().attr('r',26).attr('stroke-width',3); }
+            function showPanel(d,nodeSel){ const content = document.getElementById('data-content'); let html = `<h3>${labelMap.subject_id}: ${d.subject_id}</h3><table>`; Object.keys(d).forEach(k=>{ if (k==='subject_id') return; const label = labelMap[k] || k; html+=`<tr><td>${label}</td><td>${typeof d[k]==='number'?d[k].toFixed(2):d[k]}</td></tr>`}); html+='</table>'; content.innerHTML = html; document.getElementById('data-panel').classList.add('active'); if (current && current.node() !== nodeSel.node()) { current.transition().attr('r',18).attr('stroke-width',1.5);} current = nodeSel; nodeSel.transition().attr('r',26).attr('stroke-width',3); }
 
             function dragstarted(event,d){ if (!event.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; }
             function dragged(event,d){ d.fx=event.x; d.fy=event.y; }

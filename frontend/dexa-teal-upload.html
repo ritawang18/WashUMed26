@@ -344,6 +344,11 @@
             font-size: 1.5rem;
         }
 
+        .results-actions {
+            text-align: center;
+            margin-top: 20px;
+        }
+
         .stat-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -391,6 +396,28 @@
             background: linear-gradient(45deg, #0d47a1, #1e88e5);
             transform: translateY(-2px);
             box-shadow: 0 6px 25px rgba(21, 101, 192, 0.6);
+        }
+
+        .visualize-btn {
+            background: linear-gradient(45deg, #7b1fa2, #9c27b0);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 25px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+            box-shadow: 0 4px 20px rgba(123, 31, 162, 0.4);
+            margin-left: 12px;
+        }
+
+        .visualize-btn:hover {
+            background: linear-gradient(45deg, #4a148c, #7b1fa2);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 25px rgba(123, 31, 162, 0.6);
         }
 
         .error {
@@ -456,7 +483,7 @@
     <div class="container">
         <div class="header">
             <h1>Enhanced DEXA Processor</h1>
-            <p>Advanced Multi-File DEXA Data Processing & Analysis</p>
+            <p>Advanced Multi-File DEXA Data Processing and Analysis</p>
             <div class="features">
                 <div class="feature">Multi-File Upload</div>
                 <div class="feature">Smart Imputation</div>
@@ -466,7 +493,7 @@
             </div>
         </div>
 
-        <div class="upload-section">
+        <div class="upload-section">        subject_id, batch, timepoint
             <div class="upload-area" id="uploadArea">
                 <h3>Drop Your DEXA Files Here</h3>
                 <p>Supports: .txt, .csv, .xlsx, .xls, .pdf, .tif, .png, .jpeg, .bmp and more</p>
@@ -489,7 +516,7 @@
                 <div class="step-card">
                     <div class="step-number">2</div>
                     <h3>Auto-Clean</h3>
-                    <p>Remove duplicates & standardize data</p>
+                    <p>Remove duplicates and standardize data</p>
                 </div>
                 <div class="step-card">
                     <div class="step-number">3</div>
@@ -519,9 +546,12 @@
             <div class="results" id="results">
                 <h3>Processing Complete!</h3>
                 <div class="stat-grid" id="statGrid"></div>
-                <div style="text-align: center; margin-top: 20px;">
+                <div class="results-actions">
                     <a href="#" id="downloadBtn" class="download-btn" style="display: none;">
                         Download Processed Data
+                    </a>
+                    <a href="#" id="visualizeBtn" class="visualize-btn" style="display: none;">
+                        View Visualization
                     </a>
                 </div>
             </div>
@@ -670,6 +700,7 @@
             const results = document.getElementById('results');
             const statGrid = document.getElementById('statGrid');
             const downloadBtn = document.getElementById('downloadBtn');
+            const visualizeBtn = document.getElementById('visualizeBtn');
 
             // Create statistics display
             statGrid.innerHTML = `
@@ -704,6 +735,11 @@
                 downloadBtn.href = data.csv_download_url;
                 downloadBtn.style.display = 'inline-block';
                 downloadBtn.textContent = `Download ${data.csv_filename}`;
+            }
+
+            if (data.csv_filename) {
+                visualizeBtn.href = `visualization.html?file=${encodeURIComponent(data.csv_filename)}`;
+                visualizeBtn.style.display = 'inline-block';
             }
 
             results.classList.add('show');

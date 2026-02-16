@@ -470,6 +470,11 @@ def clean_dexa_data_enhanced(df):
     cleaned_df.columns = [column_mapping.get(col.lower().replace(' ', '_').replace('-', '_'), col) 
                          for col in cleaned_df.columns]
     
+    # Remove duplicate columns (keep first occurrence)
+    if cleaned_df.columns.duplicated().any():
+        print(f"   Found {cleaned_df.columns.duplicated().sum()} duplicate columns, removing duplicates...")
+        cleaned_df = cleaned_df.loc[:, ~cleaned_df.columns.duplicated()]
+    
     # 3. ENHANCED DATA VALIDATION AND CLEANING
     critical_fields = ['subject_id', 'batch', 'timepoint']
     before_validation = len(cleaned_df)
@@ -613,22 +618,25 @@ def clean_dexa_data_enhanced(df):
     print("   Standardizing gender values...")
     if 'gender' in cleaned_df.columns:
         gender_mapping = {
-            'm': 'Male', 'male': 'Male', 'M': 'Male', 'MALE': 'Male',
-            'f': 'Female', 'female': 'Female', 'F': 'Female', 'FEMALE': 'Female',
+            'm': 'Male', 'male': 'Male', 'M': 'Male', 'MALE': 'Male', 'Male': 'Male',
+            'f': 'Female', 'female': 'Female', 'F': 'Female', 'FEMALE': 'Female', 'Female': 'Female',
             '1': 'Male', '2': 'Female',  # Sometimes encoded as numbers
-            'boy': 'Male', 'girl': 'Female'
+            'boy': 'Male', 'girl': 'Female',
+            '': 'Unknown', 'nan': 'Unknown', 'None': 'Unknown', 'unknown': 'Unknown'
         }
         
         cleaned_df['gender'] = cleaned_df['gender'].astype(str).str.strip()
-        cleaned_df['gender'] = cleaned_df['gender'].map(gender_mapping).fillna(cleaned_df['gender'])
+        # Replace empty strings and 'nan' with actual Unknown
+        cleaned_df['gender'] = cleaned_df['gender'].replace(['', 'nan', 'None', 'NaN'], 'Unknown')
+        cleaned_df['gender'] = cleaned_df['gender'].map(gender_mapping).fillna('Unknown')
         
-        # Remove records with unrecognized gender
-        valid_genders = ['Male', 'Female']
-        gender_mask = cleaned_df['gender'].isin(valid_genders)
-        gender_removed = (~gender_mask).sum()
-        if gender_removed > 0:
-            print(f"   Removed {gender_removed} records with unrecognized gender values")
-            cleaned_df = cleaned_df[gender_mask]
+        # Mark unrecognized genders as Unknown instead of removing them
+        valid_genders = ['Male', 'Female', 'Unknown']
+        unrecognized_mask = ~cleaned_df['gender'].isin(valid_genders)
+        unrecognized_count = unrecognized_mask.sum()
+        if unrecognized_count > 0:
+            print(f"   Marked {unrecognized_count} records with unrecognized gender as 'Unknown'")
+            cleaned_df.loc[unrecognized_mask, 'gender'] = 'Unknown'
     
     records_after_cleaning = len(cleaned_df)
     total_removed = original_count - records_after_cleaning
