@@ -24,41 +24,26 @@ Complete web-based DEXA data processing system with beautiful teal interface, ad
 - **PDF**: `.pdf` documents with table extraction
 - **Images**: `.tif`, `.png`, `.jpeg`, `.bmp` DEXA scans
 
-## 🚀 Quick Start (Updated)
-
-This project contains a Flask backend and a React-based frontend. Follow these steps to get both running locally.
+## 🚀 Quick Start
 
 ### Prerequisites
 - Python 3.9+ (or compatible 3.x)
 - Node.js 16+ and npm
-- Git (for cloning / pushing changes)
 
-### Backend (Flask)
-1. Create and activate a Python virtual environment (recommended):
+### One-command start
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate   # macOS / Linux
-# .venv\Scripts\activate   # Windows (PowerShell)
-```
-
-2. Install backend dependencies and run the server:
-
-```bash
-pip install -r backend/requirements.txt
-python backend/enhanced_dexa_api.py
-```
-
-### Frontend (Development)
-1. Install dependencies and start the dev server:
-
-```bash
-cd frontend
-npm install
+pip install -r backend/requirements.txt   # first time only
+npm install                                # first time only
 npm start
 ```
 
-The React dev server runs on `http://localhost:3000` and proxies API requests to the backend. Ensure `frontend/package.json` contains a proxy entry pointing to `http://localhost:5001` (it should already be updated).
+This single `npm start` will:
+1. Auto-install frontend dependencies
+2. Start the Flask backend on `http://localhost:5001`
+3. Start the React frontend on `http://localhost:3000`
+
+Open **http://localhost:3000** to use the app. API requests are automatically proxied to the backend.
 
 ### Production / Static Hosting
 Build the frontend and serve the static `build/` folder behind the Flask app (or any static server):

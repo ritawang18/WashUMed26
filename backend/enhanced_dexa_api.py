@@ -57,10 +57,11 @@ def after_request(response):
     return response
 
 # Configuration
-UPLOAD_FOLDER = Path("temp_uploads")
-UPLOAD_FOLDER.mkdir(exist_ok=True)
-EXPORT_FOLDER = Path("../frontend/exports")
-EXPORT_FOLDER.mkdir(exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent.parent
+UPLOAD_FOLDER = BASE_DIR / "backend" / "temp_uploads"
+UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
+EXPORT_FOLDER = BASE_DIR / "frontend" / "exports"
+EXPORT_FOLDER.mkdir(parents=True, exist_ok=True)
 
 # Enhanced configuration
 MAX_FILES_PER_BATCH = 50

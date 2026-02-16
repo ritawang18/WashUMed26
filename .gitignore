@@ -1,11 +1,26 @@
 # macOS
 .DS_Store
 
-# Python virtualenvs
-backend/venv/
+# Python
+__pycache__/
+*.pyc
 .venv/
+backend/venv/
+backend/temp_uploads/
 
-# Node modules and build artifacts
-frontend/node_modules/
+# Node
+node_modules/
+package-lock.json
+
+# Build & exports
+frontend/build/
 frontend/exports/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
 
