@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
+import { supabase } from './auth/supabaseClient';
 import './DexaUploader.css';
 
-const DexaUploader = () => {
+const DexaUploader = ({ session }) => {
     const [files, setFiles] = useState([]);
     const [processing, setProcessing] = useState(false);
     const [result, setResult] = useState(null);
@@ -60,11 +61,64 @@ const DexaUploader = () => {
             const data = await response.json();
             console.log('Process response:', data);
             setResult(data);
+            if (data.status === 'success') {
+                await saveToSupabase(data);
+            }
         } catch (error) {
             console.error('Upload failed:', error);
             setResult({ error: error.message });
         } finally {
             setProcessing(false);
+        }
+    };
+
+    const saveToSupabase = async (data) => {
+        if (!session?.user?.id) return;
+        const userId = session.user.id;
+
+        try {
+            // Insert the upload session row
+            const { data: sessionRow, error: sessionError } = await supabase
+                .from('upload_sessions')
+                .insert({
+                    user_id: userId,
+                    status: 'success',
+                    files_uploaded: data.files_uploaded,
+                    files_processed: data.files_processed,
+                    total_records: data.total_records,
+                    duplicates_removed: data.duplicates_removed,
+                    imputation_strategy: data.imputation_strategy,
+                    batches_processed: data.batches_processed,
+                    timepoints_found: data.timepoints_found,
+                    csv_filename: data.csv_filename,
+                    processing_warnings: data.processing_warnings || null,
+                })
+                .select('id')
+                .single();
+
+            if (sessionError) throw sessionError;
+            const sessionId = sessionRow.id;
+
+            // Insert individual DEXA records in chunks of 100
+            if (data.records && data.records.length > 0) {
+                const recordsWithIds = data.records.map(r => ({
+                    ...r,
+                    session_id: sessionId,
+                    user_id: userId,
+                }));
+                const chunkSize = 100;
+                for (let i = 0; i < recordsWithIds.length; i += chunkSize) {
+                    const chunk = recordsWithIds.slice(i, i + chunkSize);
+                    const { error: recordsError } = await supabase
+                        .from('dexa_records')
+                        .insert(chunk);
+                    if (recordsError) throw recordsError;
+                }
+            }
+
+            console.log('Session saved to Supabase:', sessionId);
+        } catch (err) {
+            console.error('Supabase save failed (processing result still available):', err.message);
         }
     };
 
@@ -179,7 +233,7 @@ const DexaUploader = () => {
                                     <span>Total Records</span>
                                 </div>
                                 <div className="stat">
-                                    <strong>{result.batches_processed}</strong>
+                                    <strong>{Array.isArray(result.batches_processed) ? result.batches_processed.length : result.batches_processed}</strong>
                                     <span>Batches</span>
                                 </div>
                                 <div className="stat">

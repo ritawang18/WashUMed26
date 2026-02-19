@@ -753,7 +753,25 @@ def process_dexa_files():
         # Save only the clean CSV output - simple and focused
         csv_path = EXPORT_FOLDER / csv_filename
         standardized_df.to_csv(csv_path, index=False)
-        
+
+        # Build per-record list for Supabase insert
+        record_cols = ['batch', 'subject_id', 'gender', 'filename',
+                       'total_weight', 'soft_weight', 'lean_weight', 'fat_weight',
+                       'fat_percent', 'bmc', 'bmd', 'bone_area', 'sample_area']
+        records_df = standardized_df.rename(columns={'timepoint_standardized': 'timepoint'})
+        available_cols = ['timepoint'] + [c for c in record_cols if c in records_df.columns]
+        records_list = []
+        for record in records_df[available_cols].to_dict('records'):
+            clean = {}
+            for k, v in record.items():
+                if isinstance(v, (np.integer, np.int64)):
+                    clean[k] = int(v)
+                elif isinstance(v, (np.floating, np.float64)):
+                    clean[k] = None if np.isnan(v) else float(v)
+                else:
+                    clean[k] = v
+            records_list.append(clean)
+
         # Return success response - simple and clean
         response_data = {
             "status": "success",
@@ -762,13 +780,14 @@ def process_dexa_files():
             "files_processed": int(processed_count),
             "records_cleaned": int(records_cleaned),
             "test_rows_removed": int(len(df) - len(cleaned_df) - records_cleaned) if records_cleaned < len(df) - len(cleaned_df) else 0,
-            "batches_processed": int(standardized_df['batch'].nunique()),
+            "batches_processed": list(standardized_df['batch'].unique()),
             "duplicates_removed": int(duplicates_removed),
             "images_analyzed": int(standardized_df['has_image_data'].sum() if 'has_image_data' in standardized_df.columns else 0),
             "timepoints_found": list(standardized_df['timepoint_standardized'].unique()),
             "imputation_strategy": IMPUTATION_STRATEGY,
             "csv_download_url": f"http://localhost:5001/api/download/{csv_filename}",
-            "csv_filename": csv_filename
+            "csv_filename": csv_filename,
+            "records": records_list
         }
         
         # Include processing errors in response if any

@@ -1,0 +1,183 @@
+/* CasesCanvas.css */
+.cases-canvas {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 2rem;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.cases-header {
+    margin-bottom: 1.5rem;
+}
+
+.cases-header h2 {
+    color: #2c3e50;
+    margin-bottom: 0.25rem;
+}
+
+.cases-header p {
+    color: #7f8c8d;
+    font-size: 0.95rem;
+    margin: 0;
+}
+
+/* Loading */
+.cases-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+    padding: 4rem 0;
+    color: #7f8c8d;
+}
+
+/* Error */
+.cases-error {
+    text-align: center;
+    padding: 3rem 0;
+    color: #e74c3c;
+}
+
+/* Empty State */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+    padding: 5rem 0;
+    color: #95a5a6;
+}
+
+.empty-icon {
+    font-size: 4rem;
+}
+
+.empty-state p {
+    font-size: 1.1rem;
+    margin: 0;
+}
+
+/* Cases List */
+.cases-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+/* Case Card */
+.case-card {
+    background: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.case-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.case-date {
+    font-weight: 600;
+    color: #2c3e50;
+    font-size: 0.95rem;
+}
+
+.download-chip {
+    background: #3498db;
+    color: white;
+    text-decoration: none;
+    padding: 0.35rem 0.85rem;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    transition: background 0.2s ease;
+}
+
+.download-chip:hover {
+    background: #2980b9;
+}
+
+/* Stat Chips */
+.case-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.stat-chip {
+    background: #f0f3f5;
+    color: #555;
+    padding: 0.3rem 0.75rem;
+    border-radius: 20px;
+    font-size: 0.85rem;
+}
+
+.stat-chip strong {
+    color: #2c3e50;
+}
+
+/* Detail Rows */
+.case-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.case-detail-row {
+    display: flex;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+}
+
+.detail-label {
+    color: #7f8c8d;
+    min-width: 80px;
+    font-weight: 500;
+}
+
+.detail-value {
+    color: #34495e;
+}
+
+/* Warnings */
+.case-warnings {
+    font-size: 0.88rem;
+    color: #e67e22;
+    border-top: 1px solid #fdebd0;
+    padding-top: 0.5rem;
+}
+
+.case-warnings summary {
+    cursor: pointer;
+    font-weight: 500;
+}
+
+.case-warnings ul {
+    margin: 0.5rem 0 0 1.25rem;
+    padding: 0;
+    color: #7f8c8d;
+}
+
+.case-warnings li {
+    margin-bottom: 0.25rem;
+}
+
+/* Spinner (reused from uploader) */
+.spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid #e0e0e0;
+    border-radius: 50%;
+    border-top-color: #3498db;
+    animation: spin 0.8s ease-in-out infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}

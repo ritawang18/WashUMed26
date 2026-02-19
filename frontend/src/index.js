@@ -1,11 +1,72 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import DexaUploader from './DexaUploader';
+import CasesCanvas from './canvas/CasesCanvas';
+import LoginPage from './auth/LoginPage';
+import { supabase } from './auth/supabaseClient';
 import './index.css';
+
+function App() {
+  const [session, setSession] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState('upload');
+
+  useEffect(() => {
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setLoading(false);
+    });
+
+    // Listen for auth changes (login, logout)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  if (loading) return null;
+
+  if (!session) return <LoginPage />;
+
+  const displayName = session.user?.user_metadata?.display_name || session.user?.email;
+
+  return (
+    <div className="app-shell">
+      <div className="top-bar">
+        <span className="welcome-msg">Welcome, {displayName}</span>
+        <nav className="app-nav">
+          <button
+            className={view === 'upload' ? 'active' : ''}
+            onClick={() => setView('upload')}
+          >
+            New Upload
+          </button>
+          <button
+            className={view === 'cases' ? 'active' : ''}
+            onClick={() => setView('cases')}
+          >
+            My Cases
+          </button>
+        </nav>
+        <button onClick={() => supabase.auth.signOut()} className="logout-btn">
+          Sign Out
+        </button>
+      </div>
+
+      {view === 'upload' ? (
+        <DexaUploader session={session} />
+      ) : (
+        <CasesCanvas session={session} />
+      )}
+    </div>
+  );
+}
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
   <React.StrictMode>
-    <DexaUploader />
+    <App />
   </React.StrictMode>
 );

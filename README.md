@@ -37,7 +37,8 @@ pip install -r backend/requirements.txt   # first time only
 npm install                                # first time only
 npm start
 ```
-
+dev account: dev@wustl.edu
+dev password: dev123
 This single `npm start` will:
 1. Auto-install frontend dependencies
 2. Start the Flask backend on `http://localhost:5001`

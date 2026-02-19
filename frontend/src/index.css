@@ -16,3 +16,73 @@ code {
 * {
   box-sizing: border-box;
 }
+
+/* App Shell & Top Bar */
+.app-shell {
+  min-height: 100vh;
+}
+
+.top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 2rem;
+  background: white;
+  border-bottom: 1px solid #e0e0e0;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.welcome-msg {
+  color: #7f8c8d;
+  font-size: 0.95rem;
+  flex-shrink: 0;
+}
+
+.app-nav {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.app-nav button {
+  background: none;
+  border: 1px solid transparent;
+  color: #7f8c8d;
+  padding: 0.4rem 1rem;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.app-nav button:hover {
+  background: #f0f3f5;
+  color: #2c3e50;
+}
+
+.app-nav button.active {
+  background: #3498db;
+  color: white;
+  border-color: #3498db;
+  font-weight: 600;
+}
+
+.logout-btn {
+  background: none;
+  border: 1px solid #bdc3c7;
+  color: #7f8c8d;
+  padding: 0.4rem 1rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.logout-btn:hover {
+  background: #e74c3c;
+  border-color: #e74c3c;
+  color: white;
+}

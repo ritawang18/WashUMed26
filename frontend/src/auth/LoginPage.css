@@ -1,0 +1,146 @@
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #1a3a5c 0%, #2d6a9f 100%);
+}
+
+.login-card {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 48px 40px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+.login-logo {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.login-logo h1 {
+  font-size: 22px;
+  font-weight: 700;
+  color: #1a3a5c;
+  margin: 0;
+  letter-spacing: 0.5px;
+}
+
+.login-logo p {
+  font-size: 13px;
+  color: #6b7280;
+  margin: 6px 0 0;
+}
+
+.login-tabs {
+  display: flex;
+  border-bottom: 2px solid #e5e7eb;
+  margin-bottom: 28px;
+}
+
+.login-tabs button {
+  flex: 1;
+  background: none;
+  border: none;
+  padding: 10px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #9ca3af;
+  cursor: pointer;
+  position: relative;
+  transition: color 0.2s;
+}
+
+.login-tabs button.active {
+  color: #2d6a9f;
+}
+
+.login-tabs button.active::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: #2d6a9f;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 6px;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1.5px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #111827;
+  background: #f9fafb;
+  box-sizing: border-box;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  outline: none;
+}
+
+.form-group input:focus {
+  border-color: #2d6a9f;
+  box-shadow: 0 0 0 3px rgba(45, 106, 159, 0.15);
+  background: #ffffff;
+}
+
+.login-btn {
+  width: 100%;
+  padding: 12px;
+  background: #2d6a9f;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+  margin-top: 8px;
+}
+
+.login-btn:hover:not(:disabled) {
+  background: #1a3a5c;
+}
+
+.login-btn:active:not(:disabled) {
+  transform: scale(0.99);
+}
+
+.login-btn:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+}
+
+.error-msg {
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  color: #dc2626;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+.success-msg {
+  background: #f0fdf4;
+  border: 1px solid #86efac;
+  color: #16a34a;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
