@@ -196,7 +196,23 @@
             }
 
             let current = null;
-            function showPanel(d,nodeSel){ const content = document.getElementById('data-content'); let html = `<h3>${labelMap.subject_id}: ${d.subject_id}</h3><table>`; Object.keys(d).forEach(k=>{ if (k==='subject_id') return; const label = labelMap[k] || k; html+=`<tr><td>${label}</td><td>${typeof d[k]==='number'?d[k].toFixed(2):d[k]}</td></tr>`}); html+='</table>'; content.innerHTML = html; document.getElementById('data-panel').classList.add('active'); if (current && current.node() !== nodeSel.node()) { current.transition().attr('r',18).attr('stroke-width',1.5);} current = nodeSel; nodeSel.transition().attr('r',26).attr('stroke-width',3); }
+            function showPanel(d, nodeSel) {
+                const content = document.getElementById('data-content');
+                let html = `<h3>Subject: ${d.subject_id}</h3><table>`;
+                Object.keys(d).forEach(k => {
+                    const val = d[k];
+                    const display = typeof val === 'number' ? val.toFixed(4) : val;
+                    html += `<tr><td>${k}</td><td>${display}</td></tr>`;
+                });
+                html += '</table>';
+                content.innerHTML = html;
+                document.getElementById('data-panel').classList.add('active');
+                if (current && current.node() !== nodeSel.node()) {
+                    current.transition().attr('r', 18).attr('stroke-width', 1.5);
+                }
+                current = nodeSel;
+                nodeSel.transition().attr('r', 26).attr('stroke-width', 3);
+            }
 
             function dragstarted(event,d){ if (!event.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; }
             function dragged(event,d){ d.fx=event.x; d.fy=event.y; }

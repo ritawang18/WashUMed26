@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { supabase } from './auth/supabaseClient';
 import './DexaUploader.css';
 
-const DexaUploader = ({ session }) => {
+const DexaUploader = ({ session, onVisualize }) => {
     const [files, setFiles] = useState([]);
     const [processing, setProcessing] = useState(false);
     const [result, setResult] = useState(null);
@@ -128,10 +128,9 @@ const DexaUploader = ({ session }) => {
     };
 
         const goToVisualization = (csvUrlOrFilename) => {
-            // Accept either full URL or filename
             if (!csvUrlOrFilename) return;
             const filename = csvUrlOrFilename.includes('/') ? csvUrlOrFilename.split('/').pop() : csvUrlOrFilename;
-            window.location.href = `/visualization.html?file=${filename}`;
+            onVisualize(filename);
         };
 
     return (

@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import DexaUploader from './DexaUploader';
 import CasesCanvas from './canvas/CasesCanvas';
 import LoginPage from './auth/LoginPage';
+import Visualization from './Visualization';
 import { supabase } from './auth/supabaseClient';
 import './index.css';
 
@@ -10,6 +11,7 @@ function App() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState('upload');
+  const [vizFilename, setVizFilename] = useState(null);
 
   useEffect(() => {
     // Get initial session
@@ -55,8 +57,10 @@ function App() {
         </button>
       </div>
 
-      {view === 'upload' ? (
-        <DexaUploader session={session} />
+      {view === 'visualization' ? (
+        <Visualization csvFilename={vizFilename} onBack={() => setView('upload')} />
+      ) : view === 'upload' ? (
+        <DexaUploader session={session} onVisualize={(filename) => { setVizFilename(filename); setView('visualization'); }} />
       ) : (
         <CasesCanvas session={session} />
       )}
