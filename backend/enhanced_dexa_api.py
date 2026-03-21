@@ -68,85 +68,43 @@ MAX_FILES_PER_BATCH = 50
 MAX_FILE_SIZE_MB = 50
 SUPPORTED_EXTENSIONS = ['.txt', '.csv', '.xlsx', '.xls', '.pdf', '.tif', '.tiff', '.png', '.jpeg', '.jpg', '.img', '.pxl', '.bmp']
 
-# Enhanced metadata extraction from filename
+# Metadata extraction from filename
 def extract_metadata_from_filename(filename):
-    """Enhanced filename parsing to extract batch, timepoint, and gender information."""
-    filename_lower = filename.lower()
-    
-    batch = 'Unknown_Batch'
+    """Parse filename in the format '<subject_id> <timepoint>.ext', e.g. '9069 8w.txt'."""
+    name = filename.rsplit('.', 1)[0]  # strip extension
+
+    # Default values
+    subject_id = name
     timepoint = 'Unknown_Timepoint'
+    batch = 'Unknown_Batch'
     gender = 'Unknown'
-    subject_id = filename.split('.')[0]
-    
-    # Enhanced batch detection patterns
-    batch_patterns = {
-        r'batch[_\s]*1|b1[_\s]|^b1': 'Batch_1',
-        r'batch[_\s]*2|b2[_\s]|^b2': 'Batch_2', 
-        r'batch[_\s]*3|b3[_\s]|^b3': 'Batch_3',
-        r'batch[_\s]*4|b4[_\s]|^b4': 'Batch_4',
-        r'batch[_\s]*5|b5[_\s]|^b5': 'Batch_5',
-        r'batch[_\s]*6|b6[_\s]|^b6': 'Batch_6',
-        r'batch[_\s]*7|b7[_\s]|^b7': 'Batch_7',
-        r'batch[_\s]*8|b8[_\s]|^b8': 'Batch_8',
-        r'batch[_\s]*9|b9[_\s]|^b9': 'Batch_9',
-        r'batch[_\s]*10|b10[_\s]|^b10': 'Batch_10'
-    }
-    
-    for pattern, batch_name in batch_patterns.items():
-        if re.search(pattern, filename_lower):
-            batch = batch_name
-            break
-    
-    # Enhanced timepoint detection patterns  
-    timepoint_patterns = {
-        r'week[_\s]*0|week0|_0[_\s]*week|baseline|pre[_\s]*scan|prescan': 'Baseline',
-        r'week[_\s]*1|week1|_1[_\s]*week': 'Week_1',
-        r'week[_\s]*2|week2|_2[_\s]*week': 'Week_2',
-        r'week[_\s]*3|week3|_3[_\s]*week': 'Week_3',
-        r'week[_\s]*4|week4|_4[_\s]*week': 'Week_4',
-        r'week[_\s]*5|week5|_5[_\s]*week': 'Week_5',
-        r'post[_\s]*scan|postscan|post[_\s]*treatment|final': 'Post_Scan',
-        r'week[_\s]*-1|week-1': 'Baseline'
-    }
-    
-    for pattern, timepoint_name in timepoint_patterns.items():
-        if re.search(pattern, filename_lower):
-            timepoint = timepoint_name
-            break
-    
-    # Enhanced gender detection patterns
-    gender_patterns = {
-        r'[_\s]m[_\s]|[_\s]m$|^m[_\s]|male': 'Male',
-        r'[_\s]f[_\s]|[_\s]f$|^f[_\s]|female': 'Female'
-    }
-    
-    for pattern, gender_name in gender_patterns.items():
-        if re.search(pattern, filename_lower):
-            gender = gender_name
-            break
-    
+
+    # Split on first space: '<subject_id> <timepoint>'
+    parts = name.strip().split(' ', 1)
+    if len(parts) == 2:
+        subject_id = parts[0].strip()
+        timepoint_raw = parts[1].strip().lower()
+
+        # Match Nw format (e.g. 8w, 4w, 12w)
+        week_match = re.match(r'^(\d+)w$', timepoint_raw)
+        if week_match:
+            timepoint = f"Week_{week_match.group(1)}"
+        elif timepoint_raw in ('baseline', 'pre', 'prescan', '0w'):
+            timepoint = 'Baseline'
+        elif timepoint_raw in ('post', 'postscan', 'final'):
+            timepoint = 'Post_Scan'
+        else:
+            timepoint = timepoint_raw  # keep as-is if unrecognized
+
     return {
         'batch': batch,
-        'timepoint': timepoint, 
+        'timepoint': timepoint,
         'gender': gender,
         'subject_id': subject_id
     }
 
 def create_standardized_record(measurements, metadata, filename, has_image_data=False):
     """Create a standardized DEXA record with all required fields."""
-    
-    standard_fields = {
-        'total_weight': 0.0,
-        'soft_weight': 0.0, 
-        'lean_weight': 0.0,
-        'fat_weight': 0.0,
-        'fat_percent': 0.0,
-        'bmc': 0.0,
-        'bmd': 0.0,
-        'bone_area': 0.0,
-        'sample_area': 0.0
-    }
-    
     record = {
         'batch': metadata['batch'],
         'subject_id': metadata['subject_id'],
@@ -155,25 +113,37 @@ def create_standardized_record(measurements, metadata, filename, has_image_data=
         'filename': filename,
         'has_image_data': has_image_data
     }
-    
-    # Add measurements with smart mapping
-    for field in standard_fields:
-        if field in measurements:
-            record[field] = measurements[field]
-        else:
-            # Try fuzzy matching
-            found_value = None
-            for meas_key, meas_value in measurements.items():
-                if field.replace('_', '') in meas_key.replace('_', ''):
-                    found_value = meas_value
-                    break
-            record[field] = found_value if found_value is not None else standard_fields[field]
-    
-    # Add any additional measurements
-    for key, value in measurements.items():
-        if key not in record:
-            record[key] = value
-    
+
+    # If measurements are already section-prefixed (roi_/whole_), add them directly
+    if any(k.startswith('roi_') or k.startswith('whole_') for k in measurements):
+        record.update(measurements)
+    else:
+        # Legacy: fill standard fields with fuzzy matching for non-prefixed measurements
+        standard_fields = {
+            'total_weight': 0.0,
+            'soft_weight': 0.0,
+            'lean_weight': 0.0,
+            'fat_weight': 0.0,
+            'fat_percent': 0.0,
+            'bmc': 0.0,
+            'bmd': 0.0,
+            'bone_area': 0.0,
+            'sample_area': 0.0
+        }
+        for field in standard_fields:
+            if field in measurements:
+                record[field] = measurements[field]
+            else:
+                found_value = None
+                for meas_key, meas_value in measurements.items():
+                    if field.replace('_', '') in meas_key.replace('_', ''):
+                        found_value = meas_value
+                        break
+                record[field] = found_value if found_value is not None else standard_fields[field]
+        for key, value in measurements.items():
+            if key not in record:
+                record[key] = value
+
     return record
 
 def parse_dexa_file_enhanced(file_content, filename):
@@ -199,34 +169,59 @@ def parse_dexa_file_enhanced(file_content, filename):
         raise ValueError(f"Failed to parse {filename}: {str(e)}")
 
 def parse_text_file(file_content, filename, metadata):
-    """Parse text files with enhanced DEXA measurement extraction."""
+    """Parse DEXA text files, capturing ROI and Whole Tissue sections separately."""
     lines = file_content.decode('utf-8', errors='ignore').strip().split('\n')
-    measurements = {}
-    
+
     measurement_patterns = {
-        'sample_area': [r'sample\s*area[:\s]*([0-9]+\.?[0-9]*)', r'area[:\s]*([0-9]+\.?[0-9]*)'],
-        'bone_area': [r'bone\s*area[:\s]*([0-9]+\.?[0-9]*)', r'b\.?\s*area[:\s]*([0-9]+\.?[0-9]*)'],
-        'total_weight': [r'total\s*weight[:\s]*([0-9]+\.?[0-9]*)', r't\.?\s*weight[:\s]*([0-9]+\.?[0-9]*)'],
-        'soft_weight': [r'soft\s*weight[:\s]*([0-9]+\.?[0-9]*)', r's\.?\s*weight[:\s]*([0-9]+\.?[0-9]*)'],
-        'lean_weight': [r'lean\s*weight[:\s]*([0-9]+\.?[0-9]*)', r'l\.?\s*weight[:\s]*([0-9]+\.?[0-9]*)'],
-        'fat_weight': [r'fat\s*weight[:\s]*([0-9]+\.?[0-9]*)', r'f\.?\s*weight[:\s]*([0-9]+\.?[0-9]*)'],
+        'sample_area': [r'sample\s*area[:\s]*([0-9]+\.?[0-9]*)'],
+        'bone_area':   [r'bone\s*area[:\s]*([0-9]+\.?[0-9]*)'],
+        'total_weight':[r'total\s*weight[:\s]*([0-9]+\.?[0-9]*)'],
+        'soft_weight': [r'soft\s*weight[:\s]*([0-9]+\.?[0-9]*)'],
+        'lean_weight': [r'lean\s*weight[:\s]*([0-9]+\.?[0-9]*)'],
+        'fat_weight':  [r'fat\s*weight[:\s]*([0-9]+\.?[0-9]*)'],
         'fat_percent': [r'fat\s*percent[:\s]*([0-9]+\.?[0-9]*)', r'fat\s*%[:\s]*([0-9]+\.?[0-9]*)'],
-        'bmc': [r'bmc[:\s]*([0-9]+\.?[0-9]*)', r'bone\s*mineral\s*content[:\s]*([0-9]+\.?[0-9]*)'],
-        'bmd': [r'bmd[:\s]*([0-9]+\.?[0-9]*)', r'bone\s*mineral\s*density[:\s]*([0-9]+\.?[0-9]*)']
+        'bmc':         [r'bmc[:\s]*([0-9]+\.?[0-9]*)', r'bone\s*mineral\s*content[:\s]*([0-9]+\.?[0-9]*)'],
+        'bmd':         [r'bmd[:\s]*([0-9]+\.?[0-9]*)', r'bone\s*mineral\s*density[:\s]*([0-9]+\.?[0-9]*)']
     }
-    
+
+    # Track which section we're currently in
+    section = None
+    roi_measurements = {}
+    whole_measurements = {}
+
     for line in lines:
         line_clean = line.strip().lower()
+
+        # Detect section headers
+        if 'inside roi' in line_clean:
+            section = 'roi'
+            continue
+        elif 'whole tissue' in line_clean:
+            section = 'whole'
+            continue
+
+        if section is None:
+            continue
+
+        target = roi_measurements if section == 'roi' else whole_measurements
+
         for field, patterns in measurement_patterns.items():
             for pattern in patterns:
                 match = re.search(pattern, line_clean)
                 if match:
                     try:
-                        measurements[field] = float(match.group(1))
+                        target[field] = float(match.group(1))
                         break
                     except (ValueError, IndexError):
                         continue
-    
+
+    # Prefix each section's fields and merge into one measurements dict
+    measurements = {}
+    for field, value in roi_measurements.items():
+        measurements[f'roi_{field}'] = value
+    for field, value in whole_measurements.items():
+        measurements[f'whole_{field}'] = value
+
     return create_standardized_record(measurements, metadata, filename, has_image_data=False)
 
 def parse_csv_file(file_content, filename, metadata):
@@ -485,30 +480,37 @@ def clean_dexa_data_enhanced(df):
     
     # 4. MEASUREMENT FIELD STANDARDIZATION AND VALIDATION
     print("   Standardizing and validating measurements...")
-    measurement_fields = ['total_weight', 'soft_weight', 'lean_weight', 'fat_weight', 
-                         'fat_percent', 'bmc', 'bmd', 'bone_area', 'sample_area']
-    
-    # Define realistic ranges for validation
+
+    # Define realistic ranges for base field names (applied to both roi_ and whole_ columns)
     measurement_ranges = {
-        'total_weight': (5.0, 200.0),     # grams - mouse weights
-        'soft_weight': (5.0, 180.0),      # grams
-        'lean_weight': (5.0, 150.0),      # grams  
-        'fat_weight': (0.1, 50.0),        # grams
-        'fat_percent': (1.0, 60.0),       # percentage
-        'bmc': (0.01, 5.0),               # grams - bone mineral content
-        'bmd': (10.0, 300.0),             # mg/cm² - bone mineral density
-        'bone_area': (0.5, 25.0),         # cm² - bone area
-        'sample_area': (1.0, 50.0)        # cm² - sample area
+        'total_weight': (5.0, 200.0),
+        'soft_weight':  (5.0, 180.0),
+        'lean_weight':  (5.0, 150.0),
+        'fat_weight':   (0.1, 50.0),
+        'fat_percent':  (1.0, 60.0),
+        'bmc':          (0.01, 5.0),
+        'bmd':          (10.0, 300.0),
+        'bone_area':    (0.5, 25.0),
+        'sample_area':  (1.0, 50.0)
     }
-    
+
+    # Build the list of actual columns to validate, matching roi_/whole_ prefixed columns
+    measurement_fields = [
+        col for col in cleaned_df.columns
+        if any(col == f'{prefix}{base}'
+               for prefix in ('roi_', 'whole_')
+               for base in measurement_ranges)
+    ]
+
     for field in measurement_fields:
+        base_field = field.split('_', 1)[1]  # strip roi_ or whole_ prefix
         if field in cleaned_df.columns:
             # Convert to numeric first
             cleaned_df[field] = pd.to_numeric(cleaned_df[field], errors='coerce')
             
             # Apply range validation if defined
-            if field in measurement_ranges:
-                min_val, max_val = measurement_ranges[field]
+            if base_field in measurement_ranges:
+                min_val, max_val = measurement_ranges[base_field]
                 before_range = len(cleaned_df)
                 valid_mask = (cleaned_df[field] >= min_val) & (cleaned_df[field] <= max_val)
                 # Keep NaN values but remove out-of-range values
@@ -553,29 +555,7 @@ def clean_dexa_data_enhanced(df):
         if id_removed > 0:
             print(f"   Removed {id_removed} records with invalid subject IDs")
         
-        # Standardize ID format (try to extract meaningful patterns)
-        def standardize_subject_id(subject_id):
-            # Extract patterns like M001, F005, etc.
-            id_str = str(subject_id).upper()
-            
-            # Look for gender + number patterns
-            import re
-            pattern = re.search(r'([MF]).*?(\d+)', id_str)
-            if pattern:
-                gender_char, number = pattern.groups()
-                return f"{gender_char}{int(number):03d}"
-            
-            # Look for just numbers
-            number_pattern = re.search(r'(\d+)', id_str)
-            if number_pattern:
-                number = number_pattern.group(1)
-                return f"ID{int(number):03d}"
-                
-            return subject_id
-        
-        cleaned_df['subject_id_standardized'] = cleaned_df['subject_id'].apply(standardize_subject_id)
-        cleaned_df['subject_id_original'] = cleaned_df['subject_id']
-        cleaned_df['subject_id'] = cleaned_df['subject_id_standardized']
+        # Keep subject ID as raw value — no reformatting
     
     # 6. ENHANCED BATCH STANDARDIZATION
     print("   Standardizing batch naming...")
@@ -746,138 +726,46 @@ def standardize_timepoints(df):
     
     print("Standardizing timepoints...")
     
-    # Comprehensive timepoint mapping
+    # Timepoint mapping — Week_N only, no post-treatment logic
     timepoint_mapping = {
-        # Baseline variations
-        'week_0': 'Baseline', 'week0': 'Baseline', 'week 0': 'Baseline', 'w0': 'Baseline',
-        'pre_scan': 'Baseline', 'prescan': 'Baseline', 'pre scan': 'Baseline', 'pre': 'Baseline',
-        'baseline': 'Baseline', 'base': 'Baseline', 'start': 'Baseline', 'initial': 'Baseline',
-        'week_-1': 'Baseline', 'week-1': 'Baseline', 'day_0': 'Baseline', 'day0': 'Baseline',
-        
-        # Week 1 variations
-        'week_1': 'Week_1', 'week1': 'Week_1', 'week 1': 'Week_1', 'w1': 'Week_1',
-        'wk_1': 'Week_1', 'wk1': 'Week_1', '1_week': 'Week_1', '1week': 'Week_1',
-        'day_7': 'Week_1', 'day7': 'Week_1', '7_days': 'Week_1', '7days': 'Week_1',
-        
-        # Week 2 variations  
-        'week_2': 'Week_2', 'week2': 'Week_2', 'week 2': 'Week_2', 'w2': 'Week_2',
-        'wk_2': 'Week_2', 'wk2': 'Week_2', '2_week': 'Week_2', '2week': 'Week_2',
-        'day_14': 'Week_2', 'day14': 'Week_2', '14_days': 'Week_2', '14days': 'Week_2',
-        
-        # Week 3 variations
-        'week_3': 'Week_3', 'week3': 'Week_3', 'week 3': 'Week_3', 'w3': 'Week_3',
-        'wk_3': 'Week_3', 'wk3': 'Week_3', '3_week': 'Week_3', '3week': 'Week_3',
-        'day_21': 'Week_3', 'day21': 'Week_3', '21_days': 'Week_3', '21days': 'Week_3',
-        
-        # Week 4 variations (sometimes called Week 3 in naming)
-        'week_4': 'Week_4', 'week4': 'Week_4', 'week 4': 'Week_4', 'w4': 'Week_4',
-        'wk_4': 'Week_4', 'wk4': 'Week_4', '4_week': 'Week_4', '4week': 'Week_4',
-        'day_28': 'Week_4', 'day28': 'Week_4', '28_days': 'Week_4', '28days': 'Week_4',
-        'week_3_(named_week_4)': 'Week_4',  # Handle your specific naming pattern
-        
-        # Week 5 variations
-        'week_5': 'Week_5', 'week5': 'Week_5', 'week 5': 'Week_5', 'w5': 'Week_5',
-        'wk_5': 'Week_5', 'wk5': 'Week_5', '5_week': 'Week_5', '5week': 'Week_5',
-        'day_35': 'Week_5', 'day35': 'Week_5', '35_days': 'Week_5', '35days': 'Week_5',
-        
-        # Post-scan variations
-        'post_scan': 'Post_Scan', 'postscan': 'Post_Scan', 'post scan': 'Post_Scan',
-        'post_treatment': 'Post_Scan', 'post treatment': 'Post_Scan', 'posttreatment': 'Post_Scan',
-        'final': 'Post_Scan', 'end': 'Post_Scan', 'endpoint': 'Post_Scan', 'terminal': 'Post_Scan',
-        'sacrifice': 'Post_Scan', 'termination': 'Post_Scan', 'completion': 'Post_Scan',
-        
-        # Treatment period variations
-        '1_week_post-treatment': 'Week_1_Post', 
-        '2_week_post-treatment': 'Week_2_Post',
-        '3_week_post-treatment': 'Week_3_Post',
-        '1_week_post_treatment': 'Week_1_Post',
-        '2_weeks_post_treatment': 'Week_2_Post', 
-        '3_weeks_post_treatment': 'Week_3_Post',
-        
-        # Unknown/Root variations
-        'root': 'Unknown', 'unknown': 'Unknown', 'unspecified': 'Unknown',
-        'missing': 'Unknown', 'null': 'Unknown', 'na': 'Unknown', 'none': 'Unknown'
+        'baseline': 'Baseline', 'week_0': 'Baseline', 'week0': 'Baseline', 'w0': 'Baseline',
+        'pre': 'Baseline', 'prescan': 'Baseline',
+        'unknown_timepoint': 'Unknown', 'unknown': 'Unknown', 'none': 'Unknown', 'nan': 'Unknown'
     }
     
     # Store original timepoint for reference
     if 'timepoint' in df_standardized.columns:
-        df_standardized['timepoint_original'] = df_standardized['timepoint'].copy()
-        
-        # Clean and prepare timepoint values
         df_standardized['timepoint'] = df_standardized['timepoint'].astype(str).str.strip().str.lower()
-        
-        # Apply mapping
-        df_standardized['timepoint_standardized'] = df_standardized['timepoint'].map(timepoint_mapping)
-        
-        # For unmapped timepoints, try pattern matching
-        unmapped_mask = df_standardized['timepoint_standardized'].isnull()
-        if unmapped_mask.any():
-            def extract_timepoint_pattern(timepoint_str):
-                import re
-                timepoint_str = str(timepoint_str).lower()
-                
-                # Look for week + number patterns
-                week_pattern = re.search(r'week.*?(\d+)', timepoint_str)
-                if week_pattern:
-                    week_num = int(week_pattern.group(1))
-                    if week_num == 0:
-                        return 'Baseline'
-                    elif 1 <= week_num <= 5:
-                        return f'Week_{week_num}'
-                    else:
-                        return 'Post_Scan'
-                
-                # Look for day patterns
-                day_pattern = re.search(r'day.*?(\d+)', timepoint_str)
-                if day_pattern:
-                    day_num = int(day_pattern.group(1))
-                    if day_num == 0:
-                        return 'Baseline'
-                    elif 1 <= day_num <= 7:
-                        return 'Week_1'
-                    elif 8 <= day_num <= 14:
-                        return 'Week_2'
-                    elif 15 <= day_num <= 21:
-                        return 'Week_3'
-                    elif 22 <= day_num <= 28:
-                        return 'Week_4'
-                    elif 29 <= day_num <= 35:
-                        return 'Week_5'
-                    else:
-                        return 'Post_Scan'
-                
-                # Look for post/final patterns
-                if any(word in timepoint_str for word in ['post', 'final', 'end', 'terminal']):
-                    return 'Post_Scan'
-                
-                # Look for baseline patterns
-                if any(word in timepoint_str for word in ['pre', 'base', 'start', 'initial']):
-                    return 'Baseline'
-                
-                return 'Unknown'
-            
-            # Apply pattern matching to unmapped timepoints
-            df_standardized.loc[unmapped_mask, 'timepoint_standardized'] = \
-                df_standardized.loc[unmapped_mask, 'timepoint'].apply(extract_timepoint_pattern)
-        
-        # Final fallback - use original if still unmapped
-        still_unmapped = df_standardized['timepoint_standardized'].isnull()
-        if still_unmapped.any():
-            df_standardized.loc[still_unmapped, 'timepoint_standardized'] = \
-                df_standardized.loc[still_unmapped, 'timepoint_original']
-        
-        # Count standardization results
-        unique_original = df_standardized['timepoint_original'].nunique()
-        unique_standardized = df_standardized['timepoint_standardized'].nunique()
-        
-        print(f"   Original timepoints: {unique_original}")
-        print(f"   Standardized to: {unique_standardized} categories")
-        
-        # Show mapping summary
-        mapping_summary = df_standardized.groupby(['timepoint_original', 'timepoint_standardized']).size().reset_index(name='count')
-        for _, row in mapping_summary.iterrows():
-            if row['timepoint_original'] != row['timepoint_standardized']:
-                print(f"   '{row['timepoint_original']}' → '{row['timepoint_standardized']}' ({row['count']} records)")
+
+        # Apply static mapping first
+        mapped = df_standardized['timepoint'].map(timepoint_mapping)
+
+        # For unmapped timepoints, apply pattern matching
+        def extract_timepoint_pattern(timepoint_str):
+            timepoint_str = str(timepoint_str).lower()
+
+            # Match Nw format (e.g. 8w, 4w)
+            w_pattern = re.search(r'^(\d+)w$', timepoint_str)
+            if w_pattern:
+                week_num = int(w_pattern.group(1))
+                return 'Baseline' if week_num == 0 else f'Week_{week_num}'
+
+            # Match week_N / weekN / wkN patterns
+            week_pattern = re.search(r'(?:week|wk)[_\s]*(\d+)', timepoint_str)
+            if week_pattern:
+                week_num = int(week_pattern.group(1))
+                return 'Baseline' if week_num == 0 else f'Week_{week_num}'
+
+            if any(word in timepoint_str for word in ['pre', 'base', 'start', 'initial']):
+                return 'Baseline'
+
+            return timepoint_str  # keep as-is if unrecognized
+
+        unmapped_mask = mapped.isnull()
+        mapped[unmapped_mask] = df_standardized.loc[unmapped_mask, 'timepoint'].apply(extract_timepoint_pattern)
+
+        df_standardized['timepoint'] = mapped
+        print(f"   Timepoints: {sorted(df_standardized['timepoint'].unique())}")
     
     return df_standardized
 
@@ -973,8 +861,14 @@ def process_dexa_files_enhanced():
         
         # Smart imputation with configurable strategy
         imputation_strategy = request.form.get('imputation_strategy', 'group_median')
-        measurement_fields = ['total_weight', 'soft_weight', 'lean_weight', 'fat_weight', 
-                             'fat_percent', 'bmc', 'bmd', 'bone_area', 'sample_area']
+        base_fields = ['total_weight', 'soft_weight', 'lean_weight', 'fat_weight',
+                       'fat_percent', 'bmc', 'bmd', 'bone_area', 'sample_area']
+        measurement_fields = [
+            col for col in cleaned_df.columns
+            if any(col == f'{prefix}{base}'
+                   for prefix in ('roi_', 'whole_')
+                   for base in base_fields)
+        ]
         
         print("Starting smart missing data imputation...")
         imputed_df = smart_impute_missing_data_enhanced(cleaned_df, measurement_fields, strategy=imputation_strategy)
@@ -1017,7 +911,7 @@ def process_dexa_files_enhanced():
             "final_records": int(len(standardized_df)),
             "duplicates_removed": int(duplicates_removed),
             "batches_processed": int(standardized_df['batch'].nunique()),
-            "timepoints_found": list(standardized_df['timepoint_standardized'].unique()),
+            "timepoints_found": list(standardized_df['timepoint'].unique()),
             "file_type_breakdown": file_type_stats,
             "imputation_strategy": imputation_strategy,
             "images_analyzed": int(standardized_df['has_image_data'].sum() if 'has_image_data' in standardized_df.columns else 0),

@@ -1,0 +1,36 @@
+ -----------------------------------------------------------------						      DXA TISSUE STATISTICS REPORT						      Reference Image: 9067 8w
+
+ Anatomic Filter in Use: (FULL BODY - HEAD)
+
+ -----------------------------------------------------------------						      INSIDE ROI TISSUE STATISTICS:
+
+ (Top,Left)=(116, 63)        
+ (Bot,Right)= (2047, 3071)
+	    
+ Sample Area:   24.034 cm^2	    
+ Bone Area:    5.923 cm^2		
+ Total Weight:  21.4448 g
+	    
+ Soft Weight:  21.1091 g	    
+ Lean Weight:  14.7023 g		
+ Fat Weight:   6.4068 g        
+ Fat Percent:  30.351 
+        
+ BMC:   0.33569 g	    
+ BMD:   56.679 mg/cm^2
+ -----------------------------------------------------------------							   WHOLE TISSUE STATISTICS:
+
+ (Top,Left)=(0, 0)        
+ (Bot,Right)= (2047, 3071)
+	    
+ Sample Area:   26.385 cm^2	    
+ Bone Area:    7.152 cm^2		
+ Total Weight:  24.3371 g
+	    
+ Soft Weight:  23.8413 g	    
+ Lean Weight:  16.4084 g		
+ Fat Weight:   7.4330 g        
+ Fat Percent:  31.177 
+        
+ BMC:   0.49574 g	    
+ BMD:   69.315 mg/cm^2
