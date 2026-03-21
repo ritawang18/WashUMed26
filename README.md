@@ -62,6 +62,10 @@ Processed CSVs are saved to `frontend/exports` by default. The backend response 
 `http://<your-host>/visualization.html?file=<csv_filename>` when served statically.
 
 
+### Test Dev account:
+email: dev@wustl.edu
+password: dev123
+
 ### Committing & Pushing Changes
 Once you've made edits, commit and push (example):
 
