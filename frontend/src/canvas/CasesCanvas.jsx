@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { supabase } from '../auth/supabaseClient';
 import './CasesCanvas.css';
 
@@ -66,7 +66,7 @@ const CasesCanvas = ({ session }) => {
             </div>
             <div className="cases-list">
                 {sessions.map((s) => (
-                    <SessionCard key={s.id} session={s} />
+                    <SessionCard key={s.session_id} session={s} />
                 ))}
             </div>
         </div>
@@ -85,9 +85,9 @@ const SessionCard = ({ session: s }) => {
         <div className="case-card">
             <div className="case-card-header">
                 <span className="case-date">{date}</span>
-                {s.csv_filename && (
+                {s.session_id && (
                     <a
-                        href={`/api/download/${s.csv_filename}`}
+                        href={`http://localhost:5001/api/export-csv/${s.session_id}`}
                         className="download-chip"
                         download
                     >

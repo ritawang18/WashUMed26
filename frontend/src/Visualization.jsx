@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
 
-export default function Visualization({ csvFilename, onBack }) {
+export default function Visualization() {
     const svgRef = useRef(null);
     const simRef = useRef(null);
     const [selectedNode, setSelectedNode] = useState(null);
@@ -10,39 +10,67 @@ export default function Visualization({ csvFilename, onBack }) {
     const [filterMetric, setFilterMetric] = useState('all');
     const [filterMin, setFilterMin] = useState('');
     const [filterMax, setFilterMax] = useState('');
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [bmdPanelSubject, setBmdPanelSubject] = useState(null);
 
+    // Fetch data
     useEffect(() => {
-        if (!csvFilename) return;
-
-        d3.csv(`/api/download/${csvFilename}`).then(raw => {
-            // Parse numeric fields
-            raw.forEach((d, i) => {
-                Object.keys(d).forEach(k => {
-                    const val = parseFloat(d[k]);
-                    if (!isNaN(val) && d[k] !== '') d[k] = val;
+        fetch('/api/dexa-records')
+            .then(r => r.json())
+            .then(data => {
+                if (!data || data.length === 0) throw new Error('No records found in database.');
+                data.forEach((d, i) => {
+                    Object.keys(d).forEach(k => {
+                        const val = parseFloat(d[k]);
+                        if (!isNaN(val) && d[k] !== '') d[k] = val;
+                    });
+                    d._nodeId = `${d.subject_id}_${d.timepoint}_${i}`;
                 });
-                d._nodeId = `${d.subject_id}_${d.timepoint}_${i}`;
+                const numericCols = new Set();
+                data.forEach(d => Object.keys(d).forEach(k => {
+                    if (typeof d[k] === 'number') numericCols.add(k);
+                }));
+                setAllMetrics(Array.from(numericCols).filter(k => k !== '_nodeId'));
+                setAllNodes(data);
+                setLoading(false);
+            })
+            .catch(err => {
+                setError(err.message);
+                setLoading(false);
             });
-
-            // Collect numeric columns for filter dropdown
-            const numericCols = new Set();
-            raw.forEach(d => Object.keys(d).forEach(k => {
-                if (typeof d[k] === 'number') numericCols.add(k);
-            }));
-            setAllMetrics(Array.from(numericCols).filter(k => k !== '_nodeId'));
-            setAllNodes(raw);
-            drawGraph(raw, []);
-        }).catch(err => console.error('Failed to load CSV:', err));
-
         return () => { if (simRef.current) simRef.current.stop(); };
-    }, [csvFilename]);
+    }, []);
+
+    // Draw when data is ready and SVG is mounted
+    useEffect(() => {
+        if (allNodes.length > 0 && svgRef.current) {
+            drawGraph(allNodes, []);
+        }
+    }, [allNodes]);
+
+    // Parse timepoint string to week number for sorting (e.g. "Week_4" → 4, "4w" → 4)
+    function timepointToWeek(tp) {
+        if (!tp) return 999;
+        const s = String(tp).toLowerCase();
+        const m = s.match(/(\d+)/);
+        return m ? parseInt(m[1]) : 999;
+    }
+
+    // Node radius based on gender
+    function nodeRadius(d) {
+        const g = String(d.gender || '').toLowerCase();
+        if (g === 'male' || g === 'm') return 24;
+        if (g === 'female' || g === 'f') return 14;
+        return 18;
+    }
 
     function getForceSettings(n) {
-        if (n < 20)  return { charge: -250, distance: 180, collide: 50 };
-        if (n < 50)  return { charge: -200, distance: 140, collide: 40 };
-        if (n < 100) return { charge: -160, distance: 120, collide: 35 };
-        if (n < 200) return { charge: -120, distance: 100, collide: 30 };
-        return { charge: -90, distance: 85, collide: 25 };
+        if (n < 20)  return { charge: -250, distance: 180, collide: 55 };
+        if (n < 50)  return { charge: -200, distance: 140, collide: 45 };
+        if (n < 100) return { charge: -160, distance: 120, collide: 38 };
+        if (n < 200) return { charge: -120, distance: 100, collide: 32 };
+        return { charge: -90, distance: 85, collide: 28 };
     }
 
     function drawGraph(nodes, links, metric = null) {
@@ -53,8 +81,14 @@ export default function Visualization({ csvFilename, onBack }) {
         const height = svgRef.current.clientHeight;
         const s = getForceSettings(nodes.length);
 
-        const timepoints = Array.from(new Set(nodes.map(d => d.timepoint)));
-        const colorScale = d3.scaleOrdinal(d3.schemeTableau10).domain(timepoints);
+        // Sort timepoints by week number, assign teal color scale (darker=older, lighter=newer)
+        const sortedTimepoints = Array.from(new Set(nodes.map(d => d.timepoint)))
+            .sort((a, b) => timepointToWeek(a) - timepointToWeek(b));
+        const tealScale = d3.scaleSequential(d3.interpolate('#1a5276', '#a8d8ea'))
+            .domain([0, sortedTimepoints.length - 1]);
+        const timepointColor = Object.fromEntries(
+            sortedTimepoints.map((tp, i) => [tp, tealScale(i)])
+        );
 
         const linkForce = d3.forceLink()
             .id(d => d._nodeId)
@@ -66,7 +100,7 @@ export default function Visualization({ csvFilename, onBack }) {
             .force('link', linkForce)
             .force('charge', d3.forceManyBody().strength(s.charge))
             .force('center', d3.forceCenter(width / 2, height / 2))
-            .force('collision', d3.forceCollide().radius(s.collide))
+            .force('collision', d3.forceCollide().radius(d => nodeRadius(d) + 4))
             .force('x', d3.forceX(width / 2).strength(0.1))
             .force('y', d3.forceY(height / 2).strength(0.1));
         simRef.current = sim;
@@ -83,7 +117,7 @@ export default function Visualization({ csvFilename, onBack }) {
 
         const circle = nodeG.selectAll('circle').data(nodes, d => d._nodeId)
             .join('circle')
-            .attr('r', 20)
+            .attr('r', d => nodeRadius(d))
             .attr('fill', d => {
                 if (metric) {
                     const val = d[metric];
@@ -91,7 +125,7 @@ export default function Visualization({ csvFilename, onBack }) {
                     const range = d3.extent(nodes, n => n[metric]);
                     return d3.scaleSequential(d3.interpolateViridis).domain(range.reverse())(val);
                 }
-                return colorScale(d.timepoint);
+                return timepointColor[d.timepoint] || '#888';
             })
             .attr('stroke', '#222')
             .attr('stroke-width', 1.8)
@@ -103,15 +137,33 @@ export default function Visualization({ csvFilename, onBack }) {
                 .on('end',   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; })
             );
 
-        const label = labelG.selectAll('text').data(nodes, d => d._nodeId)
+        labelG.selectAll('text').data(nodes, d => d._nodeId)
             .join('text')
             .attr('text-anchor', 'middle')
-            .attr('dy', 5)
+            .attr('dy', 4)
             .text(d => d.subject_id)
             .style('fill', '#fff')
-            .style('font-size', '11px')
+            .style('font-size', '10px')
             .style('font-weight', '600')
             .style('pointer-events', 'none');
+
+        // Legend for timepoints
+        const legend = svg.append('g').attr('transform', 'translate(16, 16)');
+        sortedTimepoints.forEach((tp, i) => {
+            legend.append('rect').attr('x', 0).attr('y', i * 20).attr('width', 14).attr('height', 14)
+                .attr('fill', tealScale(i)).attr('rx', 3);
+            legend.append('text').attr('x', 20).attr('y', i * 20 + 11)
+                .text(tp).style('fill', '#1a2a3a').style('font-size', '11px');
+        });
+
+        // Legend for gender size
+        const gLegend = svg.append('g').attr('transform', `translate(16, ${sortedTimepoints.length * 20 + 32})`);
+        [['M (Male)', 24], ['Unknown', 18], ['F (Female)', 14]].forEach(([label, r], i) => {
+            gLegend.append('circle').attr('cx', 7).attr('cy', i * 28 + 7).attr('r', r * 0.55)
+                .attr('fill', '#667eea').attr('stroke', '#222').attr('stroke-width', 1);
+            gLegend.append('text').attr('x', 20).attr('y', i * 28 + 11)
+                .text(label).style('fill', '#1a2a3a').style('font-size', '11px');
+        });
 
         sim.on('tick', () => {
             if (links.length) {
@@ -119,7 +171,7 @@ export default function Visualization({ csvFilename, onBack }) {
                     .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
             }
             circle.attr('cx', d => d.x).attr('cy', d => d.y);
-            label.attr('x', d => d.x).attr('y', d => d.y);
+            labelG.selectAll('text').attr('x', d => d.x).attr('y', d => d.y);
         });
     }
 
@@ -160,13 +212,14 @@ export default function Visualization({ csvFilename, onBack }) {
         drawGraph(allNodes, []);
     }
 
+    if (loading) return <div style={{ color: '#eee', padding: 40, background: '#b8d4e3', height: '100vh' }}>Loading records...</div>;
+    if (error) return <div style={{ color: '#f88', padding: 40, background: '#b8d4e3', height: '100vh' }}>Error: {error}</div>;
+
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#1a1a2e', color: '#eee', fontFamily: 'sans-serif' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#b8d4e3', color: '#1a2a3a', fontFamily: 'sans-serif' }}>
             {/* Top bar */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 16px', background: '#16213e', flexWrap: 'wrap' }}>
-                <button onClick={onBack} style={btnStyle('#444')}>← Back</button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 16px', background: '#c5dce8', flexWrap: 'wrap' }}>
                 <strong style={{ fontSize: '1rem' }}>DEXA Visualization</strong>
-                <span style={{ color: '#aaa', fontSize: '0.85rem' }}>{csvFilename}</span>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', flexWrap: 'wrap' }}>
                     <label style={{ fontSize: '0.85rem' }}>Filter by:</label>
@@ -183,25 +236,69 @@ export default function Visualization({ csvFilename, onBack }) {
 
             {/* Main area */}
             <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+                {/* BMD over-time panel (left) */}
+                {bmdPanelSubject && (() => {
+                    const subjectRows = allNodes
+                        .filter(n => n.subject_id === bmdPanelSubject)
+                        .sort((a, b) => timepointToWeek(a.timepoint) - timepointToWeek(b.timepoint));
+                    const bmdCols = subjectRows.length > 0
+                        ? Object.keys(subjectRows[0]).filter(k => k.toLowerCase().includes('bmd') && !['_nodeId'].includes(k))
+                        : [];
+                    return (
+                        <div style={{ width: 360, background: '#d0e8f2', borderRight: '2px solid #00b4d8', overflowY: 'auto', padding: 16, flexShrink: 0 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                <strong style={{ color: '#00b4d8' }}>BMD over time — {bmdPanelSubject}</strong>
+                            </div>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
+                                <thead>
+                                    <tr>
+                                        <th style={thStyle}>Timepoint</th>
+                                        {bmdCols.map(c => <th key={c} style={thStyle}>{c}</th>)}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {subjectRows.map((row, i) => (
+                                        <tr key={i} style={{ borderBottom: '1px solid #ccc' }}>
+                                            <td style={{ ...tdStyle, color: '#000' }}>{row.timepoint ?? '—'}</td>
+                                            {bmdCols.map(c => (
+                                                <td key={c} style={{ ...tdStyle, color: '#000' }}>
+                                                    {typeof row[c] === 'number' ? row[c].toFixed(4) : (row[c] ?? '—')}
+                                                </td>
+                                            ))}
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    );
+                })()}
                 <svg ref={svgRef} style={{ flex: 1, display: 'block' }} />
 
                 {/* Side panel */}
                 {selectedNode && (
-                    <div style={{ width: 340, background: '#16213e', borderLeft: '2px solid #667eea', overflowY: 'auto', padding: 16 }}>
+                    <div style={{ width: 340, background: '#c5dce8', borderLeft: '2px solid #667eea', overflowY: 'auto', padding: 16 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                             <strong style={{ color: '#667eea' }}>Subject: {selectedNode.subject_id}</strong>
-                            <span onClick={() => setSelectedNode(null)} style={{ cursor: 'pointer', fontSize: '1.2rem', color: '#aaa' }}>×</span>
+                            <span onClick={() => { setSelectedNode(null); setBmdPanelSubject(null); }} style={{ cursor: 'pointer', fontSize: '1.2rem', color: '#aaa' }}>×</span>
                         </div>
                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
                             <tbody>
                                 {Object.entries(selectedNode)
                                     .filter(([k]) => !['_nodeId', 'x', 'y', 'vx', 'vy', 'fx', 'fy', 'index'].includes(k))
-                                    .map(([k, v]) => (
-                                        <tr key={k} style={{ borderBottom: '1px solid #2a2a4a' }}>
-                                            <td style={{ color: '#aaa', padding: '4px 6px', width: '55%', wordBreak: 'break-all' }}>{k}</td>
-                                            <td style={{ padding: '4px 6px' }}>{typeof v === 'number' ? v.toFixed(4) : v}</td>
-                                        </tr>
-                                    ))}
+                                    .map(([k, v]) => {
+                                        const isBmd = k === 'roi_bmd';
+                                        const isActive = isBmd && bmdPanelSubject === selectedNode.subject_id;
+                                        return (
+                                            <tr
+                                                key={k}
+                                                style={{ borderBottom: '1px solid #ccc', background: 'transparent' }}
+                                                onClick={isBmd ? () => setBmdPanelSubject(isActive ? null : selectedNode.subject_id) : undefined}
+                                            >
+                                                <td style={{ color: '#000', padding: '4px 6px', width: '55%', wordBreak: 'break-all', cursor: isBmd ? 'pointer' : 'default' }}>{k}{isBmd ? ' ↔' : ''}</td>
+                                                <td style={{ padding: '4px 6px', color: '#000', cursor: isBmd ? 'pointer' : 'default' }}>{typeof v === 'number' ? v.toFixed(4) : String(v)}</td>
+                                            </tr>
+                                        );
+                                    })}
                             </tbody>
                         </table>
                     </div>
@@ -218,5 +315,14 @@ const btnStyle = (bg) => ({
 
 const inputStyle = {
     padding: '4px 8px', borderRadius: 4, border: '1px solid #555',
-    background: '#2a2a4a', color: '#eee', fontSize: '0.85rem'
+    background: '#fff', color: '#1a2a3a', fontSize: '0.85rem'
+};
+
+const thStyle = {
+    padding: '4px 6px', textAlign: 'left', color: '#000',
+    borderBottom: '1px solid #ccc', whiteSpace: 'nowrap'
+};
+
+const tdStyle = {
+    padding: '4px 6px', color: '#000', whiteSpace: 'nowrap'
 };

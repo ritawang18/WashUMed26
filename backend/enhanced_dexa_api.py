@@ -16,7 +16,7 @@ Export to multiple formats with summaries
 Based on unified format logic from batch processing notebooks.
 """
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -30,6 +30,18 @@ import zipfile
 import re
 import warnings
 warnings.filterwarnings('ignore')
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent / '.env')
+
+# Supabase client
+try:
+    from supabase import create_client
+    _supabase_url = os.environ.get('SUPABASE_URL')
+    _supabase_key = os.environ.get('SUPABASE_SERVICE_KEY')
+    supabase_client = create_client(_supabase_url, _supabase_key) if _supabase_url and _supabase_key else None
+except ImportError:
+    supabase_client = None
 
 # Optional PDF support
 try:
@@ -60,8 +72,6 @@ def after_request(response):
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOAD_FOLDER = BASE_DIR / "backend" / "temp_uploads"
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
-EXPORT_FOLDER = BASE_DIR / "frontend" / "exports"
-EXPORT_FOLDER.mkdir(parents=True, exist_ok=True)
 
 # Enhanced configuration
 MAX_FILES_PER_BATCH = 50
@@ -883,19 +893,54 @@ def process_dexa_files_enhanced():
         standardized_df = standardized_df.drop_duplicates()
         duplicates_removed = original_count - len(standardized_df)
         
-        # Generate enhanced filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        counter = 1
-        while True:
-            csv_filename = f"DEXA_Enhanced_{timestamp}_{counter:02d}.csv"
-            if not (EXPORT_FOLDER / csv_filename).exists():
-                break
-            counter += 1
-        
-        # Save enhanced CSV output
-        csv_path = EXPORT_FOLDER / csv_filename
-        standardized_df.to_csv(csv_path, index=False)
-        
+        # Generate session_id for this processing run
+        session_id = str(uuid.uuid4())
+
+        # Save records to Supabase dexa_records
+        if supabase_client is not None:
+            try:
+                records = standardized_df.where(pd.notnull(standardized_df), None).to_dict(orient='records')
+                for r in records:
+                    r['session_id'] = session_id
+                chunk_size = 100
+                for i in range(0, len(records), chunk_size):
+                    supabase_client.table('dexa_records').insert(records[i:i+chunk_size]).execute()
+                print(f"Saved {len(records)} records to dexa_records with session_id {session_id}.")
+            except Exception as e:
+                print(f"Supabase dexa_records insert failed: {e}")
+
+        # Upsert to dexa_bmd — one row per subject, timepoints stored as JSONB in val_at_time
+        if supabase_client is not None:
+            try:
+                df_clean = standardized_df.where(pd.notnull(standardized_df), None)
+                bmd_rows = {}
+                for _, row in df_clean.iterrows():
+                    sid = str(row.get('subject_id', '')).strip()
+                    if not sid:
+                        continue
+                    timepoint = str(row.get('timepoint', '')).strip()
+                    roi_bmd = row.get('roi_bmd', None)
+                    if sid not in bmd_rows:
+                        bmd_rows[sid] = {
+                            'subject_id': sid,
+                            'genotype': str(row.get('genotype', 'Unknown')) if row.get('genotype') else 'Unknown',
+                            'sex': str(row.get('gender', 'Unknown')) if row.get('gender') else 'Unknown',
+                            'val_at_time': {}
+                        }
+                    if timepoint and roi_bmd is not None:
+                        bmd_rows[sid]['val_at_time'][timepoint] = float(roi_bmd)
+
+                for sid, record in bmd_rows.items():
+                    supabase_client.rpc('upsert_dexa_bmd', {
+                        'p_subject_id': record['subject_id'],
+                        'p_genotype': record['genotype'],
+                        'p_sex': record['sex'],
+                        'p_val_at_time': record['val_at_time']
+                    }).execute()
+                print(f"Upserted {len(bmd_rows)} rows to dexa_bmd.")
+            except Exception as e:
+                print(f"Supabase dexa_bmd upsert failed: {e}")
+
         print("Enhanced processing complete!")
         
         # Enhanced response with detailed statistics
@@ -915,8 +960,7 @@ def process_dexa_files_enhanced():
             "file_type_breakdown": file_type_stats,
             "imputation_strategy": imputation_strategy,
             "images_analyzed": int(standardized_df['has_image_data'].sum() if 'has_image_data' in standardized_df.columns else 0),
-            "csv_download_url": f"http://localhost:5001/api/download/{csv_filename}",
-            "csv_filename": csv_filename,
+            "session_id": session_id,
             "supported_formats": SUPPORTED_EXTENSIONS,
             "processing_features": [
                 "Multi-file batch processing",
@@ -956,28 +1000,39 @@ def process_dexa_files_enhanced():
             "error": f"Processing failed: {str(e)}"
         }), 500
 
-@app.route('/api/download/<filename>')
-def download_file(filename):
-    """Enhanced file download with proper headers."""
+@app.route('/api/export-csv/<session_id>')
+def export_csv(session_id):
+    """Generate and return a CSV of dexa_records for a given session."""
     try:
-        file_path = EXPORT_FOLDER / filename
-        if not file_path.exists():
-            file_path = UPLOAD_FOLDER / filename
-            
-        if file_path.exists():
-            response = send_file(
-                file_path, 
-                as_attachment=True,
-                download_name=filename,
-                mimetype='application/octet-stream'
-            )
-            response.headers['Access-Control-Allow-Origin'] = '*'
-            response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition'
-            return response
-        else:
-            return jsonify({"error": "File not found"}), 404
+        if supabase_client is None:
+            return jsonify({"error": "Supabase not connected"}), 503
+        result = supabase_client.table('dexa_records').select('*').eq('session_id', session_id).execute()
+        if not result.data:
+            return jsonify({"error": "No records found for this session"}), 404
+        df = pd.DataFrame(result.data)
+        csv_buffer = io.StringIO()
+        df.to_csv(csv_buffer, index=False)
+        csv_buffer.seek(0)
+        response = app.response_class(
+            csv_buffer.getvalue(),
+            mimetype='text/csv',
+            headers={'Content-Disposition': f'attachment; filename=DEXA_{session_id[:8]}.csv',
+                     'Access-Control-Allow-Origin': '*'}
+        )
+        return response
     except Exception as e:
-        app.logger.error(f"Error serving file {filename}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/dexa-records')
+def get_dexa_records():
+    """Return all records from dexa_records table."""
+    if supabase_client is None:
+        return jsonify({"error": "Supabase not connected"}), 503
+    try:
+        result = supabase_client.table('dexa_records').select('*').execute()
+        return jsonify(result.data)
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/health')

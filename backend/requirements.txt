@@ -4,3 +4,5 @@ numpy>=1.24.3
 Pillow>=10.0.1
 openpyxl>=3.1.2
 werkzeug>=2.3.7
+supabase>=2.0.0
+python-dotenv>=1.0.0

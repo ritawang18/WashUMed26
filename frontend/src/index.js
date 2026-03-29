@@ -11,7 +11,7 @@ function App() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState('upload');
-  const [vizFilename, setVizFilename] = useState(null);
+  const [, setVizFilename] = useState(null);
 
   useEffect(() => {
     // Get initial session
@@ -51,6 +51,12 @@ function App() {
           >
             My Cases
           </button>
+          <button
+            className={view === 'visualization' ? 'active' : ''}
+            onClick={() => setView('visualization')}
+          >
+            Visualize Data
+          </button>
         </nav>
         <button onClick={() => supabase.auth.signOut()} className="logout-btn">
           Sign Out
@@ -58,7 +64,7 @@ function App() {
       </div>
 
       {view === 'visualization' ? (
-        <Visualization csvFilename={vizFilename} onBack={() => setView('upload')} />
+        <Visualization />
       ) : view === 'upload' ? (
         <DexaUploader session={session} onVisualize={(filename) => { setVizFilename(filename); setView('visualization'); }} />
       ) : (
