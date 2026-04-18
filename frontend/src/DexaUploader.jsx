@@ -109,6 +109,25 @@ const insertPayload = {
         setResult(null);
     };
 
+    const downloadCsv = async () => {
+        const url = result?.csv_download_url;
+        if (!url) return;
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error('Download failed');
+            const blob = await resp.blob();
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = result.csv_filename || 'unified_dexa_cleaned.csv';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(link.href);
+        } catch (err) {
+            alert('Download failed: ' + err.message);
+        }
+    };
+
         const goToVisualization = (csvUrlOrFilename) => {
             if (!csvUrlOrFilename) return;
             const filename = csvUrlOrFilename.includes('/') ? csvUrlOrFilename.split('/').pop() : csvUrlOrFilename;
@@ -136,7 +155,7 @@ const insertPayload = {
                             type="file" 
                             id="file-upload"
                             multiple 
-                            accept=".txt,.csv,.xlsx,.xls,.png,.jpg,.jpeg,.tif,.bmp,.img,.pxl" 
+                            accept=".txt,.csv,.xlsx,.xls,.pdf,.png,.jpg,.jpeg,.tif,.bmp,.img,.pxl"
                             onChange={handleFileUpload}
                             className="file-input"
                         />
@@ -145,7 +164,7 @@ const insertPayload = {
                             <div className="upload-text">
                                 <strong>Click to upload</strong> or drag and drop
                                 <br />
-                                <small>Supports .txt and .csv files from DEXA batches</small>
+                                <small>Supports .txt, .csv, .xlsx, and .pdf files from DEXA batches</small>
                             </div>
                         </label>
                     </div>
@@ -228,13 +247,14 @@ const insertPayload = {
                             </div>
 
                             <div className="download-section">
-                                <a 
-                                    href={result.csv_download_url} 
-                                    download="unified_dexa_cleaned.csv"
-                                    className="download-btn primary"
-                                >
-                                    📊 Download CSV Dataset
-                                </a>
+                                {result.csv_download_url && (
+                                    <button
+                                        onClick={downloadCsv}
+                                        className="download-btn primary"
+                                    >
+                                        📊 Download CSV Dataset
+                                    </button>
+                                )}
                                 
                                 {result.excel_download_url && (
                                     <a 

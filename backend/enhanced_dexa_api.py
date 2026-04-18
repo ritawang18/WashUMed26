@@ -50,6 +50,13 @@ try:
 except ImportError:
     PDF_SUPPORT = False
 
+# PDF table extraction (requires pdf_table_extractor.py in same directory)
+try:
+    from pdf_table_extractor import extract_tables_from_bytes
+    PDF_TABLE_SUPPORT = True
+except ImportError:
+    PDF_TABLE_SUPPORT = False
+
 # Enhanced Excel support
 try:
     import xlrd
@@ -72,6 +79,8 @@ def after_request(response):
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOAD_FOLDER = BASE_DIR / "backend" / "temp_uploads"
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
+EXPORTS_FOLDER = BASE_DIR / "frontend" / "exports"
+EXPORTS_FOLDER.mkdir(parents=True, exist_ok=True)
 
 # Enhanced configuration
 MAX_FILES_PER_BATCH = 50
@@ -340,25 +349,278 @@ def parse_excel_file(file_content, filename, metadata):
         raise ValueError(f"Failed to parse Excel file: {str(e)}")
 
 def parse_pdf_file(file_content, filename, metadata):
-    """Parse PDF files with text extraction."""
+    """Parse PDF files: table extraction first, text extraction fallback."""
     if not PDF_SUPPORT:
         raise ValueError("PDF processing not available - install pdfplumber")
-    
+
+    # PRIMARY: table-based extraction
+    if PDF_TABLE_SUPPORT:
+        try:
+            tables = extract_tables_from_bytes(file_content)
+        except Exception as e:
+            app.logger.warning(f"PDF table extraction failed for {filename}: {e}")
+            tables = []
+        if tables:
+            # Extract full text for metadata; fall back to pytesseract for scanned PDFs
+            try:
+                with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+                    ocr_text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+            except Exception:
+                ocr_text = ""
+            if not ocr_text.strip():
+                ocr_text = _get_pdf_ocr_text(file_content)
+            return _tables_to_dexa_records(tables, metadata, filename, ocr_text=ocr_text)
+
+    # FALLBACK: existing text extraction
     try:
         with pdfplumber.open(io.BytesIO(file_content)) as pdf:
-            text_content = ""
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text_content += page_text + "\n"
-        
+            text_content = "\n".join(p.extract_text() or "" for p in pdf.pages)
         if not text_content.strip():
             raise ValueError("No text found in PDF")
-        
         return parse_text_content_for_measurements(text_content, metadata, filename)
-        
     except Exception as e:
         raise ValueError(f"Failed to parse PDF file: {str(e)}")
+
+
+def _get_pdf_ocr_text(pdf_bytes: bytes) -> str:
+    """Run pytesseract OCR on PDF pages to extract raw text (for scanned PDFs)."""
+    try:
+        import pytesseract
+        from pdf2image import convert_from_bytes
+        images = convert_from_bytes(pdf_bytes, dpi=150, first_page=1, last_page=3)
+        return "\n".join(pytesseract.image_to_string(img) for img in images)
+    except Exception:
+        return ""
+
+
+def _extract_pdf_metadata(ocr_text: str) -> dict:
+    """Extract subject_id and timepoint from PDF full text via regex."""
+    result = {}
+    m = re.search(r'(?:sample|patient|subject|animal)\s+(?:id|#|no)[:\s#]*(\w+)', ocr_text, re.IGNORECASE)
+    if m:
+        result['subject_id'] = m.group(1)
+    m = re.search(r'(?:collection|report|drawn|date)[:\s]+([0-9]{1,2}[/\-][0-9]{1,2}[/\-][0-9]{2,4})', ocr_text, re.IGNORECASE)
+    if m:
+        result['timepoint'] = m.group(1).replace('/', '-')
+    return result
+
+
+def _build_pdf_record(measurements, metadata, filename):
+    """Flat record with metadata + actual measurements only — no DEXA zero-fill."""
+    record = {
+        'batch': metadata.get('batch', 'unknown_batch'),
+        'subject_id': metadata.get('subject_id', 'unknown'),
+        'timepoint': metadata.get('timepoint', 'Unknown_Timepoint'),
+        'filename': filename,
+    }
+    record.update(measurements)
+    return record
+
+
+_KNOWN_CBC_PARAMS = {
+    'wbc', 'rbc', 'hgb', 'hct', 'mcv', 'mch', 'mchc', 'rdw', 'plt', 'mpv',
+}
+
+
+def _normalize_param_col(raw_param: str) -> str:
+    """Normalize a raw param name (from OCR) to a consistent column name."""
+    col = raw_param.lower()
+    col = re.sub(r'\s*#\s*', '_num', col)
+    col = re.sub(r'\s*%\s*', '_pct', col)
+    col = re.sub(r'[\s\-\.]+', '_', col)
+    col = re.sub(r'[^a-z0-9_]', '', col)
+    col = col.strip('_')
+    # If the cleaned name matches a known CBC acronym, use it directly
+    if col in _KNOWN_CBC_PARAMS:
+        return col
+    return col
+
+
+def _is_long_format_table(all_rows):
+    """
+    Detect row-per-parameter format: rows starting with sequential integers (1, 2, 3...).
+    Common in lab reports where each parameter occupies one row.
+    """
+    sequential = 0
+    expected = 1
+    for row in all_rows:
+        first = str(row[0]).strip() if row else ''
+        if first.isdigit() and int(first) == expected:
+            sequential += 1
+            expected += 1
+    return sequential >= 3
+
+
+def _parse_lab_row(tokens):
+    """
+    Parse one numbered row from a lab report into structured fields.
+    Input:  ['1', 'WBC', 'H', '22.68', '10^3/uL', '0.80', '-', '10.60']
+    Output: {test_no, parameter, flag, result, unit, ref_range}
+    """
+    if not tokens or not tokens[0].isdigit():
+        return None
+
+    i = 0
+    test_no = int(tokens[i]); i += 1
+
+    # Collect param tokens until first parseable float
+    param_tokens = []
+    while i < len(tokens):
+        try:
+            float(tokens[i].replace(',', ''))
+            break
+        except ValueError:
+            param_tokens.append(tokens[i])
+            i += 1
+
+    # Separate trailing flag (H/L/N/A/C) from param name
+    flag = None
+    if len(param_tokens) >= 2 and param_tokens[-1] in ('H', 'L', 'N', 'A', 'C'):
+        flag = param_tokens.pop()
+    elif len(param_tokens) == 1 and param_tokens[0] in ('H', 'L', 'N', 'A', 'C'):
+        # Only a flag — OCR may have split acronym (e.g. "HGB" → "H" "GB")
+        # Don't strip; keep as param
+        pass
+
+    # If stripping left a single short token and we stripped something, it was likely a split acronym
+    # e.g. ["H", "GB"] with flag="H" stripped → ["GB"] — restore
+    if flag and len(param_tokens) == 1 and len(param_tokens[0]) <= 2:
+        param_tokens = [flag] + param_tokens
+        flag = None
+
+    parameter = ' '.join(param_tokens).strip()
+    if not parameter:
+        return None
+
+    # Result value (first float)
+    result = None
+    if i < len(tokens):
+        try:
+            result = float(tokens[i].replace(',', ''))
+            i += 1
+        except ValueError:
+            pass
+
+    # Unit: first non-numeric, non-dash, multi-char token after result
+    unit = None
+    if i < len(tokens):
+        try:
+            float(tokens[i].replace(',', ''))
+        except ValueError:
+            if tokens[i] not in ('-', '–', '—') and len(tokens[i]) > 1:
+                unit = tokens[i]
+                i += 1
+
+    # Remaining tokens form the reference range
+    ref_tokens = tokens[i:]
+    ref_range = ' '.join(ref_tokens).replace(' - ', '-').replace(' – ', '-').strip() if ref_tokens else None
+
+    return {
+        'test_no': test_no,
+        'parameter': parameter,
+        'flag': flag,
+        'result': result,
+        'unit': unit,
+        'ref_range': ref_range,
+    }
+
+
+def _extract_long_format_records(all_rows, metadata, filename):
+    """
+    Convert a numbered-row (long-format) lab table into one record per parameter row.
+    Output columns: batch, subject_id, timepoint, filename, test_no, parameter, flag, result, unit, ref_range
+    """
+    records = []
+    for row in all_rows:
+        tokens = [str(c).strip() for c in row if str(c).strip()]
+        parsed = _parse_lab_row(tokens)
+        if parsed and parsed['result'] is not None and parsed['parameter']:
+            rec = _build_pdf_record({
+                'test_no': parsed['test_no'],
+                'parameter': parsed['parameter'],
+                'flag': parsed['flag'] or '',
+                'result': parsed['result'],
+                'unit': parsed['unit'] or '',
+                'ref_range': parsed['ref_range'] or '',
+            }, metadata, filename)
+            records.append(rec)
+    return records
+
+
+def _tables_to_dexa_records(tables, metadata, filename, ocr_text=""):
+    """
+    Convert extracted PDF tables into DEXA record dicts.
+    Handles two formats:
+    - Long format (numbered rows per parameter): pivots into a single wide record
+    - Wide format (one row per subject): each row becomes one record
+    """
+    # Override filename-derived metadata with PDF-extracted values
+    pdf_meta = _extract_pdf_metadata(ocr_text)
+    metadata = metadata.copy()
+    if pdf_meta.get('subject_id'):
+        metadata['subject_id'] = pdf_meta['subject_id']
+    if pdf_meta.get('timepoint'):
+        metadata['timepoint'] = pdf_meta['timepoint']
+    elif metadata.get('timepoint') in ('Unknown_Timepoint', None, ''):
+        metadata['timepoint'] = 'Baseline'
+
+    all_records = []
+
+    for table_idx, table in enumerate(tables):
+        headers = table.get("headers", [])
+        rows = table.get("rows", [])
+        if not rows:
+            continue
+
+        # Recombine for analysis — rows keep their natural (un-padded) lengths
+        all_rows = [list(headers)] + [list(r) for r in rows]
+
+        # Detect numbered row-per-parameter format (lab reports, etc.)
+        if _is_long_format_table(all_rows):
+            records = _extract_long_format_records(all_rows, metadata, filename)
+            all_records.extend(records)
+            # Long-format found — remaining tables are likely OCR noise (charts, footers)
+            break
+
+        # Wide format: each row is one record
+        if not headers:
+            continue
+        clean_headers = [
+            str(h).strip().lower().replace(' ', '_').replace('-', '_').replace('/', '_')
+            for h in headers
+        ]
+
+        for row_idx, row in enumerate(rows):
+            padded = list(row) + [''] * max(0, len(clean_headers) - len(row))
+            padded = padded[:len(clean_headers)]
+
+            row_measurements = {}
+            for col_name, cell_val in zip(clean_headers, padded):
+                if not col_name:
+                    continue
+                cell_str = str(cell_val).strip() if cell_val is not None else ''
+                if not cell_str:
+                    row_measurements[col_name] = np.nan
+                    continue
+                try:
+                    row_measurements[col_name] = float(cell_str.replace(',', ''))
+                except ValueError:
+                    row_measurements[col_name] = cell_str
+
+            if not row_measurements or all(
+                (isinstance(v, float) and np.isnan(v)) or v == ''
+                for v in row_measurements.values()
+            ):
+                continue
+
+            row_metadata = metadata.copy()
+            row_metadata['subject_id'] = f"{metadata['subject_id']}_t{table_idx+1}_r{row_idx+1}"
+            all_records.append(_build_pdf_record(row_measurements, row_metadata, filename))
+
+    if not all_records:
+        raise ValueError("PDF contained tables but no usable DEXA data rows")
+
+    return all_records
 
 def parse_image_file(file_content, filename, metadata):
     """Parse image files and extract metadata."""
@@ -908,16 +1170,33 @@ def process_dexa_files_enhanced():
         # Save records to Supabase dexa_records
         if supabase_client is not None:
             try:
+                import math
+                _DEXA_RECORD_COLS = {
+                    'session_id', 'batch', 'subject_id', 'timepoint', 'filename',
+                    'has_image_data', 'gender', 'genotype', 'age', 'image_path',
+                    'total_weight', 'soft_weight', 'lean_weight', 'fat_weight',
+                    'fat_percent', 'bmc', 'bmd', 'bone_area', 'sample_area',
+                    'roi_bmd', 'whole_bmd', 'roi_bone_area', 'whole_bone_area',
+                    'roi_bmc', 'whole_bmc', 'roi_fat_percent', 'whole_fat_percent',
+                    'roi_total_weight', 'whole_total_weight', 'roi_lean_weight',
+                    'whole_lean_weight', 'roi_fat_weight', 'whole_fat_weight',
+                    'roi_soft_weight', 'whole_soft_weight',
+                }
                 records = standardized_df.where(pd.notnull(standardized_df), None).to_dict(orient='records')
                 for r in records:
                     r['session_id'] = session_id
+                    # Replace non-finite floats that break JSON
+                    for k, v in list(r.items()):
+                        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                            r[k] = None
+                # Only insert columns that exist in dexa_records schema
+                records = [{k: v for k, v in r.items() if k in _DEXA_RECORD_COLS} for r in records]
                 chunk_size = 100
                 for i in range(0, len(records), chunk_size):
                     supabase_client.table('dexa_records').insert(records[i:i+chunk_size]).execute()
                 print(f"Saved {len(records)} records to dexa_records with session_id {session_id}.")
             except Exception as e:
-                print(f"Supabase dexa_records insert failed: {e}")
-                return jsonify({"status": "error", "error": f"DB insert failed: {str(e)}"}), 500
+                app.logger.warning(f"Supabase dexa_records insert failed (non-critical): {e}")
 
         # Upsert to dexa_bmd — one row per subject, timepoints stored as JSONB in val_at_time
         if supabase_client is not None:
@@ -1000,7 +1279,17 @@ def process_dexa_files_enhanced():
         
         for key, value in response_data.items():
             response_data[key] = convert_numpy_types(value)
-            
+
+        # Save CSV locally so it can be downloaded without Supabase
+        try:
+            csv_filename = f"DEXA_{session_id[:8]}.csv"
+            csv_path = EXPORTS_FOLDER / csv_filename
+            standardized_df.to_csv(csv_path, index=False)
+            response_data["csv_filename"] = csv_filename
+            response_data["csv_download_url"] = f"/api/download/{csv_filename}"
+        except Exception as e:
+            app.logger.warning(f"Could not save CSV export: {e}")
+
         return jsonify(response_data)
         
     except Exception as e:
@@ -1032,6 +1321,23 @@ def export_csv(session_id):
         return response
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/download/<filename>')
+def download_file(filename):
+    """Serve a processed CSV file from the exports folder."""
+    from flask import send_from_directory
+    safe_name = Path(filename).name  # prevent path traversal
+    file_path = EXPORTS_FOLDER / safe_name
+    if not file_path.exists():
+        return jsonify({"error": "File not found"}), 404
+    return send_from_directory(
+        str(EXPORTS_FOLDER),
+        safe_name,
+        as_attachment=True,
+        download_name=safe_name,
+        mimetype='text/csv'
+    )
 
 
 @app.route('/api/dexa-records')
