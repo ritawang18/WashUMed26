@@ -119,7 +119,6 @@ def create_standardized_record(measurements, metadata, filename, has_image_data=
         'batch': metadata['batch'],
         'subject_id': metadata['subject_id'],
         'timepoint': metadata['timepoint'],
-        'gender': metadata['gender'],
         'filename': filename,
         'has_image_data': has_image_data
     }
@@ -896,6 +895,16 @@ def process_dexa_files_enhanced():
         # Generate session_id for this processing run
         session_id = str(uuid.uuid4())
 
+        # Ensure all subjects exist in subject_grouping before inserting dexa_records (FK constraint)
+        if supabase_client is not None:
+            try:
+                unique_subjects = [{'subject_id': sid} for sid in standardized_df['subject_id'].dropna().unique()]
+                for i in range(0, len(unique_subjects), 100):
+                    supabase_client.table('subject_grouping').upsert(unique_subjects[i:i+100], on_conflict='subject_id').execute()
+                print(f"Upserted {len(unique_subjects)} subjects into subject_grouping.")
+            except Exception as e:
+                print(f"subject_grouping upsert failed: {e}")
+
         # Save records to Supabase dexa_records
         if supabase_client is not None:
             try:
@@ -908,6 +917,7 @@ def process_dexa_files_enhanced():
                 print(f"Saved {len(records)} records to dexa_records with session_id {session_id}.")
             except Exception as e:
                 print(f"Supabase dexa_records insert failed: {e}")
+                return jsonify({"status": "error", "error": f"DB insert failed: {str(e)}"}), 500
 
         # Upsert to dexa_bmd — one row per subject, timepoints stored as JSONB in val_at_time
         if supabase_client is not None:
@@ -1032,6 +1042,52 @@ def get_dexa_records():
     try:
         result = supabase_client.table('dexa_records').select('*').execute()
         return jsonify(result.data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/subject-groupings')
+def get_subject_groupings():
+    """Return all subject groupings."""
+    if supabase_client is None:
+        return jsonify({"error": "Supabase not connected"}), 503
+    try:
+        result = supabase_client.table('subject_grouping').select('*').execute()
+        return jsonify(result.data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/subject-groupings/<subject_id>', methods=['POST'])
+def upsert_subject_grouping(subject_id):
+    """Upsert grouping fields (flag, gender, dob, genotype) for a subject."""
+    if supabase_client is None:
+        return jsonify({"error": "Supabase not connected"}), 503
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+    flag = data.get('flag')
+    if flag and flag not in ('experiment', 'control'):
+        return jsonify({"error": "Invalid flag value"}), 400
+    row = {'subject_id': subject_id}
+    for field in ('flag', 'gender', 'dob', 'genotype'):
+        if field in data:
+            row[field] = data[field]
+    try:
+        result = supabase_client.table('subject_grouping').upsert(row).execute()
+        return jsonify({"success": True, "data": result.data})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/dexa-records/<record_id>', methods=['PATCH'])
+def update_dexa_record(record_id):
+    """Update a single field (or fields) on a dexa_records row."""
+    if supabase_client is None:
+        return jsonify({"error": "Supabase not connected"}), 503
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+    try:
+        result = supabase_client.table('dexa_records').update(data).eq('id', record_id).execute()
+        return jsonify({"success": True, "record": result.data[0] if result.data else {}})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

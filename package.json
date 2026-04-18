@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "prestart": "cd frontend && npm install --silent",
-    "start": "concurrently --names backend,frontend --prefix-colors blue,green \"npm run backend --silent\" \"npm run frontend --silent\"",
+    "start": "concurrently --names backend,frontend --prefix-colors blue,green \"npm run backend\" \"npm run frontend\"",
     "backend": "python backend/enhanced_dexa_api.py",
     "frontend": "cd frontend && npm start"
   },
