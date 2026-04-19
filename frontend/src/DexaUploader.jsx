@@ -7,63 +7,40 @@ const DexaUploader = ({ session, onVisualize }) => {
     const [processing, setProcessing] = useState(false);
     const [result, setResult] = useState(null);
     const [dragActive, setDragActive] = useState(false);
+    const [editableRecords, setEditableRecords] = useState([]);
 
-    // Handle file selection
     const handleFileUpload = (event) => {
-        const selectedFiles = Array.from(event.target.files);
-        setFiles(selectedFiles);
+        setFiles(Array.from(event.target.files));
     };
 
-    // Handle drag and drop
     const handleDrag = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (e.type === "dragenter" || e.type === "dragover") {
-            setDragActive(true);
-        } else if (e.type === "dragleave") {
-            setDragActive(false);
-        }
+        if (e.type === "dragenter" || e.type === "dragover") setDragActive(true);
+        else if (e.type === "dragleave") setDragActive(false);
     };
 
     const handleDrop = (e) => {
         e.preventDefault();
         e.stopPropagation();
         setDragActive(false);
-        
-        if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-            const droppedFiles = Array.from(e.dataTransfer.files);
-            setFiles(droppedFiles);
-        }
+        if (e.dataTransfer.files?.[0]) setFiles(Array.from(e.dataTransfer.files));
     };
 
-    // Process files using your unified format logic
     const processFiles = async () => {
         if (files.length === 0) return;
-        
         setProcessing(true);
-        
         const formData = new FormData();
-        files.forEach(file => {
-            formData.append('files', file);
-        });
+        files.forEach(file => formData.append('files', file));
 
         try {
-            // Using our own API implementation
-            const response = await fetch('/api/process-dexa', {
-                method: 'POST',
-                body: formData
-            });
-            
-            if (!response.ok) {
-                throw new Error('Processing failed');
-            }
-            
+            const response = await fetch('/api/process-dexa', { method: 'POST', body: formData });
+            if (!response.ok) throw new Error('Processing failed');
             const data = await response.json();
             console.log('Process response:', data);
             setResult(data);
-            if (data.status === 'success') {
-                await saveToSupabase(data);
-            }
+            if (data.records) setEditableRecords(data.records);
+            if (data.status === 'success') await saveToSupabase(data);
         } catch (error) {
             console.error('Upload failed:', error);
             setResult({ error: error.message });
@@ -74,11 +51,9 @@ const DexaUploader = ({ session, onVisualize }) => {
 
     const saveToSupabase = async (data) => {
         if (!session?.user?.id) return;
-        const userId = session.user.id;
-
         try {
-const insertPayload = {
-                user_id: userId,
+            const insertPayload = {
+                user_id: session.user.id,
                 status: 'success',
                 files_uploaded: data.files_uploaded,
                 files_processed: data.files_processed,
@@ -90,15 +65,8 @@ const insertPayload = {
                 processing_warnings: data.processing_warnings || null,
             };
             if (data.session_id) insertPayload.session_id = data.session_id;
-
-            const { data: sessionRow, error: sessionError } = await supabase
-                .from('upload_sessions')
-                .insert(insertPayload)
-                .select('session_id')
-                .single();
-
-            if (sessionError) throw sessionError;
-            console.log('Session saved to Supabase:', sessionRow.id);
+            const { error } = await supabase.from('upload_sessions').insert(insertPayload).select('session_id').single();
+            if (error) throw error;
         } catch (err) {
             console.error('Supabase save failed:', err.message);
         }
@@ -107,32 +75,44 @@ const insertPayload = {
     const resetUploader = () => {
         setFiles([]);
         setResult(null);
+        setEditableRecords([]);
     };
 
-    const downloadCsv = async () => {
-        const url = result?.csv_download_url;
-        if (!url) return;
-        try {
-            const resp = await fetch(url);
-            if (!resp.ok) throw new Error('Download failed');
-            const blob = await resp.blob();
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = result.csv_filename || 'unified_dexa_cleaned.csv';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            URL.revokeObjectURL(link.href);
-        } catch (err) {
-            alert('Download failed: ' + err.message);
-        }
+    // Edit a single cell in the editable table
+    const handleCellEdit = (rowIdx, col, value) => {
+        setEditableRecords(prev => {
+            const next = prev.map((r, i) => i === rowIdx ? { ...r, [col]: value } : r);
+            return next;
+        });
     };
 
-        const goToVisualization = (csvUrlOrFilename) => {
-            if (!csvUrlOrFilename) return;
-            const filename = csvUrlOrFilename.includes('/') ? csvUrlOrFilename.split('/').pop() : csvUrlOrFilename;
-            onVisualize(filename);
+    // Download current (possibly edited) records as CSV
+    const downloadEditedCsv = () => {
+        if (editableRecords.length === 0) return;
+        const cols = Object.keys(editableRecords[0]);
+        const escape = v => {
+            const s = v === null || v === undefined ? '' : String(v);
+            return s.includes(',') || s.includes('"') || s.includes('\n')
+                ? `"${s.replace(/"/g, '""')}"` : s;
         };
+        const csv = [cols.join(','), ...editableRecords.map(r => cols.map(c => escape(r[c])).join(','))].join('\n');
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = result?.csv_filename || 'data.csv';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+    };
+
+    const goToVisualization = (csvUrlOrFilename) => {
+        if (!csvUrlOrFilename) return;
+        const filename = csvUrlOrFilename.includes('/') ? csvUrlOrFilename.split('/').pop() : csvUrlOrFilename;
+        onVisualize(filename);
+    };
+
+    const columns = editableRecords.length > 0 ? Object.keys(editableRecords[0]) : [];
 
     return (
         <div className="dexa-uploader">
@@ -143,18 +123,17 @@ const insertPayload = {
 
             {!result && (
                 <>
-                    {/* File Upload Area */}
-                    <div 
+                    <div
                         className={`upload-area ${dragActive ? 'drag-active' : ''}`}
                         onDragEnter={handleDrag}
                         onDragLeave={handleDrag}
                         onDragOver={handleDrag}
                         onDrop={handleDrop}
                     >
-                        <input 
-                            type="file" 
+                        <input
+                            type="file"
                             id="file-upload"
-                            multiple 
+                            multiple
                             accept=".txt,.csv,.xlsx,.xls,.pdf,.png,.jpg,.jpeg,.tif,.bmp,.img,.pxl"
                             onChange={handleFileUpload}
                             className="file-input"
@@ -169,7 +148,6 @@ const insertPayload = {
                         </label>
                     </div>
 
-                    {/* File List */}
                     {files.length > 0 && (
                         <div className="file-list">
                             <h3>Selected Files ({files.length})</h3>
@@ -177,56 +155,36 @@ const insertPayload = {
                                 {files.map((file, index) => (
                                     <div key={index} className="file-item">
                                         <span className="file-name">{file.name}</span>
-                                        <span className="file-size">
-                                            {(file.size / 1024).toFixed(1)} KB
-                                        </span>
+                                        <span className="file-size">{(file.size / 1024).toFixed(1)} KB</span>
                                     </div>
                                 ))}
                             </div>
                         </div>
                     )}
 
-                    {/* Process Button */}
                     <div className="action-area">
-                        <button 
-                            onClick={processFiles} 
-                            disabled={files.length === 0 || processing}
-                            className="process-btn"
-                        >
-                            {processing ? (
-                                <>
-                                    <div className="spinner"></div>
-                                    Processing DEXA Data...
-                                </>
-                            ) : (
-                                'Clean & Standardize Data'
-                            )}
+                        <button onClick={processFiles} disabled={files.length === 0 || processing} className="process-btn">
+                            {processing ? (<><div className="spinner"></div>Processing DEXA Data...</>) : 'Clean & Standardize Data'}
                         </button>
-                        
                         {files.length > 0 && (
-                            <button onClick={resetUploader} className="reset-btn">
-                                Clear Files
-                            </button>
+                            <button onClick={resetUploader} className="reset-btn">Clear Files</button>
                         )}
                     </div>
                 </>
             )}
 
-            {/* Results Section */}
             {result && (
                 <div className="results-section">
                     {result.error ? (
                         <div className="error-result">
                             <h3>❌ Processing Failed</h3>
                             <p>{result.error}</p>
-                            <button onClick={resetUploader} className="retry-btn">
-                                Try Again
-                            </button>
+                            <button onClick={resetUploader} className="retry-btn">Try Again</button>
                         </div>
                     ) : (
                         <div className="success-result">
                             <h3>✅ Processing Complete!</h3>
-                            
+
                             <div className="result-stats">
                                 <div className="stat">
                                     <strong>{result.total_records}</strong>
@@ -246,46 +204,64 @@ const insertPayload = {
                                 </div>
                             </div>
 
+                            {/* Editable Table */}
+                            {editableRecords.length > 0 && (
+                                <div className="editable-table-section">
+                                    <div className="editable-table-header">
+                                        <h4>📝 Review & Edit Results</h4>
+                                        <small>Click any cell to edit. Changes apply to the downloaded CSV.</small>
+                                    </div>
+                                    <div className="editable-table-wrapper">
+                                        <table className="editable-table">
+                                            <thead>
+                                                <tr>
+                                                    {columns.map(col => <th key={col}>{col}</th>)}
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {editableRecords.map((row, rowIdx) => (
+                                                    <tr key={rowIdx}>
+                                                        {columns.map(col => (
+                                                            <td key={col}>
+                                                                <input
+                                                                    value={row[col] === null || row[col] === undefined ? '' : row[col]}
+                                                                    onChange={e => handleCellEdit(rowIdx, col, e.target.value)}
+                                                                    className="cell-input"
+                                                                />
+                                                            </td>
+                                                        ))}
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
                             <div className="download-section">
-                                {result.csv_download_url && (
-                                    <button
-                                        onClick={downloadCsv}
-                                        className="download-btn primary"
-                                    >
-                                        📊 Download CSV Dataset
-                                    </button>
-                                )}
-                                
+                                <button onClick={downloadEditedCsv} className="download-btn primary">
+                                    📊 Download CSV Dataset
+                                </button>
+
                                 {result.excel_download_url && (
-                                    <a 
-                                        href={result.excel_download_url} 
-                                        download="unified_dexa_analysis.xlsx"
-                                        className="download-btn secondary"
-                                    >
+                                    <a href={result.excel_download_url} download="unified_dexa_analysis.xlsx" className="download-btn secondary">
                                         📈 Download Excel Analysis
                                     </a>
                                 )}
 
-                                {/* Show visualization button when CSV URL is available */}
                                 {result.csv_download_url && (
-                                    <button
-                                        onClick={() => goToVisualization(result.csv_download_url)}
-                                        className="download-btn visualization"
-                                    >
+                                    <button onClick={() => goToVisualization(result.csv_download_url)} className="download-btn visualization">
                                         📊 View Interactive Visualization
                                     </button>
                                 )}
                             </div>
 
-                            <button onClick={resetUploader} className="new-upload-btn">
-                                Process New Files
-                            </button>
+                            <button onClick={resetUploader} className="new-upload-btn">Process New Files</button>
                         </div>
                     )}
                 </div>
             )}
 
-            {/* Format Preview */}
             <div className="format-preview">
                 <h4>📋 Output Format</h4>
                 <p>Your files will be standardized to this format:</p>
@@ -293,41 +269,22 @@ const insertPayload = {
                     <table>
                         <thead>
                             <tr>
-                                <th>batch</th>
-                                <th>subject_id</th>
-                                <th>timepoint_standardized</th>
-                                <th>gender</th>
-                                <th>total_weight</th>
-                                <th>bmd</th>
-                                <th>fat_percent</th>
-                                <th>image_path</th>
+                                <th>batch</th><th>subject_id</th><th>timepoint_standardized</th>
+                                <th>gender</th><th>total_weight</th><th>bmd</th><th>fat_percent</th><th>image_path</th>
                             </tr>
                         </thead>
                         <tbody>
                             <tr>
-                                <td>Batch_1</td>
-                                <td>B1_M_1</td>
-                                <td>Baseline</td>
-                                <td>Male</td>
-                                <td>33.61</td>
-                                <td>80.06</td>
-                                <td>25.97</td>
-                                <td>/path/to/image.jpg</td>
+                                <td>Batch_1</td><td>B1_M_1</td><td>Baseline</td>
+                                <td>Male</td><td>33.61</td><td>80.06</td><td>25.97</td><td>/path/to/image.jpg</td>
                             </tr>
                             <tr>
-                                <td>Batch_2</td>
-                                <td>B2_F_3</td>
-                                <td>Week_1</td>
-                                <td>Female</td>
-                                <td>28.45</td>
-                                <td>75.23</td>
-                                <td>22.14</td>
-                                <td>/path/to/image.bmp</td>
+                                <td>Batch_2</td><td>B2_F_3</td><td>Week_1</td>
+                                <td>Female</td><td>28.45</td><td>75.23</td><td>22.14</td><td>/path/to/image.bmp</td>
                             </tr>
                         </tbody>
                     </table>
                 </div>
-                
                 <div className="feature-list">
                     <h5>✨ Features:</h5>
                     <ul>
