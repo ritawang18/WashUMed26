@@ -1,4 +1,38 @@
 /* DexaUploader.css */
+
+/* Upload mode toggle tabs */
+.upload-mode-toggle {
+    display: flex;
+    gap: 0;
+    margin-bottom: 1.5rem;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 2px solid #3498db;
+    width: fit-content;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.mode-tab {
+    padding: 0.6rem 1.6rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    border: none;
+    cursor: pointer;
+    background: #fff;
+    color: #3498db;
+    transition: background 0.2s, color 0.2s;
+}
+
+.mode-tab:hover {
+    background: #ebf5fb;
+}
+
+.mode-tab.active {
+    background: #3498db;
+    color: #fff;
+}
+
 .dexa-uploader {
     max-width: 1000px;
     margin: 0 auto;

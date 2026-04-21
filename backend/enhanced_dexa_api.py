@@ -961,84 +961,112 @@ def process_dexa_files_enhanced():
             }), 400
         
         print(f"Total records extracted: {len(all_data)}")
-        
-        # Create DataFrame and apply enhanced processing
-        df = pd.DataFrame(all_data)
-        
-        # Enhanced data cleaning
-        print("Starting enhanced data cleaning...")
-        cleaned_df = clean_dexa_data_enhanced(df)
-        
-        # Smart imputation with configurable strategy
-        imputation_strategy = request.form.get('imputation_strategy', 'group_median')
-        base_fields = ['total_weight', 'soft_weight', 'lean_weight', 'fat_weight',
-                       'fat_percent', 'bmc', 'bmd', 'bone_area', 'sample_area']
-        measurement_fields = [
-            col for col in cleaned_df.columns
-            if any(col == f'{prefix}{base}'
-                   for prefix in ('roi_', 'whole_')
-                   for base in base_fields)
-        ]
-        
-        print("Starting smart missing data imputation...")
-        imputed_df = smart_impute_missing_data_enhanced(cleaned_df, measurement_fields, strategy=imputation_strategy)
-        
-        # Timepoint standardization
-        print("Standardizing timepoints...")
-        standardized_df = standardize_timepoints(imputed_df)
-        
-        # Enhanced duplicate removal
-        print("Removing duplicates...")
-        original_count = len(standardized_df)
-        standardized_df = standardized_df.drop_duplicates()
-        duplicates_removed = original_count - len(standardized_df)
-        
+
+        # Split PDF/hematology records from DEXA records
+        # PDF records always have a 'parameter' field; DEXA records never do
+        pdf_records = [r for r in all_data if 'parameter' in r]
+        dexa_data = [r for r in all_data if 'parameter' not in r]
+        upload_mode = request.form.get('upload_mode', 'dexa')
+        if pdf_records:
+            print(f"  {len(pdf_records)} hematology (PDF) records, {len(dexa_data)} DEXA records")
+
         # Generate session_id for this processing run
         session_id = str(uuid.uuid4())
 
-        # Ensure all subjects exist in subject_grouping before inserting dexa_records (FK constraint)
-        if supabase_client is not None:
-            try:
-                unique_subjects = [{'subject_id': sid} for sid in standardized_df['subject_id'].dropna().unique()]
-                for i in range(0, len(unique_subjects), 100):
-                    supabase_client.table('subject_grouping').upsert(unique_subjects[i:i+100], on_conflict='subject_id').execute()
-                print(f"Upserted {len(unique_subjects)} subjects into subject_grouping.")
-            except Exception as e:
-                print(f"subject_grouping upsert failed: {e}")
+        # --- DEXA pipeline (only when there are DEXA records) ---
+        standardized_df = pd.DataFrame()
+        cleaned_df = pd.DataFrame()
+        imputed_df = pd.DataFrame()
+        duplicates_removed = 0
+        imputation_strategy = request.form.get('imputation_strategy', 'group_median')
 
-        # Save records to Supabase dexa_records
-        if supabase_client is not None:
+        if dexa_data:
+            df = pd.DataFrame(dexa_data)
+
+            # Enhanced data cleaning
+            print("Starting enhanced data cleaning...")
+            cleaned_df = clean_dexa_data_enhanced(df)
+
+            # Smart imputation with configurable strategy
+            base_fields = ['total_weight', 'soft_weight', 'lean_weight', 'fat_weight',
+                           'fat_percent', 'bmc', 'bmd', 'bone_area', 'sample_area']
+            measurement_fields = [
+                col for col in cleaned_df.columns
+                if any(col == f'{prefix}{base}'
+                       for prefix in ('roi_', 'whole_')
+                       for base in base_fields)
+            ]
+
+            print("Starting smart missing data imputation...")
+            imputed_df = smart_impute_missing_data_enhanced(cleaned_df, measurement_fields, strategy=imputation_strategy)
+
+            # Timepoint standardization
+            print("Standardizing timepoints...")
+            standardized_df = standardize_timepoints(imputed_df)
+
+            # Enhanced duplicate removal
+            print("Removing duplicates...")
+            original_count = len(standardized_df)
+            standardized_df = standardized_df.drop_duplicates()
+            duplicates_removed = original_count - len(standardized_df)
+
+            # Ensure all subjects exist in subject_grouping before inserting dexa_records (FK constraint)
+            if supabase_client is not None:
+                try:
+                    unique_subjects = [{'subject_id': sid} for sid in standardized_df['subject_id'].dropna().unique()]
+                    for i in range(0, len(unique_subjects), 100):
+                        supabase_client.table('subject_grouping').upsert(unique_subjects[i:i+100], on_conflict='subject_id').execute()
+                    print(f"Upserted {len(unique_subjects)} subjects into subject_grouping.")
+                except Exception as e:
+                    print(f"subject_grouping upsert failed: {e}")
+
+            # Save records to Supabase dexa_records
+            if supabase_client is not None:
+                try:
+                    import math
+                    _DEXA_RECORD_COLS = {
+                        'session_id', 'batch', 'subject_id', 'timepoint', 'filename',
+                        'has_image_data', 'gender', 'genotype', 'age', 'image_path',
+                        'total_weight', 'soft_weight', 'lean_weight', 'fat_weight',
+                        'fat_percent', 'bmc', 'bmd', 'bone_area', 'sample_area',
+                        'roi_bmd', 'whole_bmd', 'roi_bone_area', 'whole_bone_area',
+                        'roi_bmc', 'whole_bmc', 'roi_fat_percent', 'whole_fat_percent',
+                        'roi_total_weight', 'whole_total_weight', 'roi_lean_weight',
+                        'whole_lean_weight', 'roi_fat_weight', 'whole_fat_weight',
+                        'roi_soft_weight', 'whole_soft_weight',
+                    }
+                    records = standardized_df.where(pd.notnull(standardized_df), None).to_dict(orient='records')
+                    for r in records:
+                        r['session_id'] = session_id
+                        for k, v in list(r.items()):
+                            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                                r[k] = None
+                    records = [{k: v for k, v in r.items() if k in _DEXA_RECORD_COLS} for r in records]
+                    chunk_size = 100
+                    for i in range(0, len(records), chunk_size):
+                        supabase_client.table('dexa_records').insert(records[i:i+chunk_size]).execute()
+                    print(f"Saved {len(records)} records to dexa_records with session_id {session_id}.")
+                except Exception as e:
+                    app.logger.warning(f"Supabase dexa_records insert failed (non-critical): {e}")
+
+        # --- Save hematology records to hematology_records table ---
+        if supabase_client is not None and pdf_records:
             try:
-                import math
-                _DEXA_RECORD_COLS = {
+                _HEMA_COLS = {
                     'session_id', 'batch', 'subject_id', 'timepoint', 'filename',
-                    'has_image_data', 'gender', 'genotype', 'age', 'image_path',
-                    'total_weight', 'soft_weight', 'lean_weight', 'fat_weight',
-                    'fat_percent', 'bmc', 'bmd', 'bone_area', 'sample_area',
-                    'roi_bmd', 'whole_bmd', 'roi_bone_area', 'whole_bone_area',
-                    'roi_bmc', 'whole_bmc', 'roi_fat_percent', 'whole_fat_percent',
-                    'roi_total_weight', 'whole_total_weight', 'roi_lean_weight',
-                    'whole_lean_weight', 'roi_fat_weight', 'whole_fat_weight',
-                    'roi_soft_weight', 'whole_soft_weight',
+                    'test_no', 'parameter', 'flag', 'result', 'unit', 'ref_range',
                 }
-                records = standardized_df.where(pd.notnull(standardized_df), None).to_dict(orient='records')
-                for r in records:
+                hema_rows = [{k: v for k, v in r.items() if k in _HEMA_COLS} for r in pdf_records]
+                for r in hema_rows:
                     r['session_id'] = session_id
-                    # Replace non-finite floats that break JSON
-                    for k, v in list(r.items()):
-                        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-                            r[k] = None
-                # Only insert columns that exist in dexa_records schema
-                records = [{k: v for k, v in r.items() if k in _DEXA_RECORD_COLS} for r in records]
-                chunk_size = 100
-                for i in range(0, len(records), chunk_size):
-                    supabase_client.table('dexa_records').insert(records[i:i+chunk_size]).execute()
-                print(f"Saved {len(records)} records to dexa_records with session_id {session_id}.")
+                for i in range(0, len(hema_rows), 100):
+                    supabase_client.table('hematology_records').insert(hema_rows[i:i+100]).execute()
+                print(f"Saved {len(hema_rows)} hematology records to hematology_records.")
             except Exception as e:
-                app.logger.warning(f"Supabase dexa_records insert failed (non-critical): {e}")
+                app.logger.warning(f"Supabase hematology_records insert failed (non-critical): {e}")
 
         # Upsert to dexa_bmd — one row per subject, timepoints stored as JSONB in val_at_time
-        if supabase_client is not None:
+        if supabase_client is not None and not standardized_df.empty:
             try:
                 df_clean = standardized_df.where(pd.notnull(standardized_df), None)
                 bmd_rows = {}
@@ -1070,21 +1098,28 @@ def process_dexa_files_enhanced():
                 print(f"Supabase dexa_bmd upsert failed: {e}")
 
         print("Enhanced processing complete!")
-        
+
+        # Determine output records for frontend editable table
+        if not standardized_df.empty:
+            output_records = standardized_df.where(standardized_df.notna(), other=None).to_dict(orient='records')
+        else:
+            output_records = pdf_records
+
         # Enhanced response with detailed statistics
         response_data = {
             "status": "success",
             "processing_method": "enhanced_multi_file",
-            "total_records": int(len(standardized_df)),
+            "upload_mode": upload_mode,
+            "total_records": int(len(output_records)),
             "files_uploaded": int(len([f for f in files if f.filename != ''])),
             "files_processed": int(processed_count),
-            "records_before_cleaning": int(len(df)),
-            "records_after_cleaning": int(len(cleaned_df)),
-            "records_after_imputation": int(len(imputed_df)),
-            "final_records": int(len(standardized_df)),
+            "records_before_cleaning": int(len(cleaned_df)) if not cleaned_df.empty else 0,
+            "records_after_cleaning": int(len(cleaned_df)) if not cleaned_df.empty else 0,
+            "records_after_imputation": int(len(imputed_df)) if not imputed_df.empty else 0,
+            "final_records": int(len(output_records)),
             "duplicates_removed": int(duplicates_removed),
-            "batches_processed": int(standardized_df['batch'].nunique()),
-            "timepoints_found": list(standardized_df['timepoint'].unique()),
+            "batches_processed": int(standardized_df['batch'].nunique()) if not standardized_df.empty else (len({r.get('batch') for r in pdf_records if r.get('batch')})),
+            "timepoints_found": list(standardized_df['timepoint'].unique()) if not standardized_df.empty else list({r.get('timepoint') for r in pdf_records if r.get('timepoint')}),
             "file_type_breakdown": file_type_stats,
             "imputation_strategy": imputation_strategy,
             "images_analyzed": int(standardized_df['has_image_data'].sum() if 'has_image_data' in standardized_df.columns else 0),
@@ -1092,7 +1127,7 @@ def process_dexa_files_enhanced():
             "supported_formats": SUPPORTED_EXTENSIONS,
             "processing_features": [
                 "Multi-file batch processing",
-                "Flexible file type support", 
+                "Flexible file type support",
                 "Smart missing data imputation",
                 "Automatic data cleaning",
                 "Timepoint standardization",
@@ -1121,15 +1156,13 @@ def process_dexa_files_enhanced():
 
         # Save CSV locally so it can be downloaded without Supabase
         try:
-            csv_filename = f"DEXA_{session_id[:8]}.csv"
+            prefix = "HEMA" if upload_mode == "hematology" else "DEXA"
+            csv_filename = f"{prefix}_{session_id[:8]}.csv"
             csv_path = EXPORTS_FOLDER / csv_filename
-            standardized_df.to_csv(csv_path, index=False)
+            pd.DataFrame(output_records).to_csv(csv_path, index=False)
             response_data["csv_filename"] = csv_filename
             response_data["csv_download_url"] = f"/api/download/{csv_filename}"
-            # Include raw records for frontend editable table
-            response_data["records"] = standardized_df.where(
-                standardized_df.notna(), other=None
-            ).to_dict(orient='records')
+            response_data["records"] = output_records
         except Exception as e:
             app.logger.warning(f"Could not save CSV export: {e}")
 
