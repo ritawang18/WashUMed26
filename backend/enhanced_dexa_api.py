@@ -28,6 +28,7 @@ from datetime import datetime
 import io
 import zipfile
 import re
+import json
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -43,12 +44,12 @@ try:
 except ImportError:
     supabase_client = None
 
-# Optional PDF support
+# Gemini API for PDF extraction
 try:
-    import pdfplumber
-    PDF_SUPPORT = True
+    from google import genai as genai_client
+    GEMINI_SUPPORT = True
 except ImportError:
-    PDF_SUPPORT = False
+    GEMINI_SUPPORT = False
 
 # Enhanced Excel support
 try:
@@ -72,6 +73,8 @@ def after_request(response):
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOAD_FOLDER = BASE_DIR / "backend" / "temp_uploads"
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
+EXPORTS_FOLDER = BASE_DIR / "frontend" / "exports"
+EXPORTS_FOLDER.mkdir(parents=True, exist_ok=True)
 
 # Enhanced configuration
 MAX_FILES_PER_BATCH = 50
@@ -339,26 +342,124 @@ def parse_excel_file(file_content, filename, metadata):
     except Exception as e:
         raise ValueError(f"Failed to parse Excel file: {str(e)}")
 
-def parse_pdf_file(file_content, filename, metadata):
-    """Parse PDF files with text extraction."""
-    if not PDF_SUPPORT:
-        raise ValueError("PDF processing not available - install pdfplumber")
-    
+def _extract_pdf_with_gemini(pdf_bytes: bytes, filename: str) -> dict:
+    """
+    Use Gemini API to extract tables from a PDF.
+    Returns dict: {subject_id, collection_date, rows: [{parameter, flag, result, unit, ref_range}]}
+    """
+    gemini_key = os.environ.get('GEMINI_API_KEY')
+    if not gemini_key:
+        raise ValueError("GEMINI_API_KEY not set")
+
+    client = genai_client.Client(api_key=gemini_key)
+
+    prompt = """Extract ALL data from the table(s) in this document.
+
+Return ONLY a JSON object with this exact structure (no markdown, no extra text):
+{
+  "subject_id": "<patient/sample/animal ID found in the document, or null>",
+  "collection_date": "<collection or report date found in the document, or null>",
+  "rows": [
+    {
+      "parameter": "<test/measurement name>",
+      "result": <numeric value as number, or null if missing>,
+      "flag": "<H/L/N/A/C or empty string>",
+      "unit": "<unit string or empty string>",
+      "ref_range": "<reference range string or empty string>"
+    }
+  ]
+}
+
+Rules:
+- Include every row in the table, even if result is missing
+- result must be a number (float/int), never a string
+- If the document has multiple tables, merge all rows into one "rows" array
+- Do not skip any rows"""
+
+    tmp_path = None
     try:
-        with pdfplumber.open(io.BytesIO(file_content)) as pdf:
-            text_content = ""
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text_content += page_text + "\n"
-        
-        if not text_content.strip():
-            raise ValueError("No text found in PDF")
-        
-        return parse_text_content_for_measurements(text_content, metadata, filename)
-        
-    except Exception as e:
-        raise ValueError(f"Failed to parse PDF file: {str(e)}")
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
+
+        with open(tmp_path, 'rb') as f:
+            uploaded = client.files.upload(
+                file=f,
+                config={'mime_type': 'application/pdf'}
+            )
+
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[uploaded, prompt]
+        )
+        raw = response.text.strip()
+
+        # Strip markdown code fences if present
+        if raw.startswith('```'):
+            raw = re.sub(r'^```[a-z]*\n?', '', raw)
+            raw = re.sub(r'\n?```$', '', raw)
+
+        return json.loads(raw)
+
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def parse_pdf_file(file_content, filename, metadata):
+    """Parse PDF files using Gemini API."""
+    if not GEMINI_SUPPORT or not os.environ.get('GEMINI_API_KEY'):
+        raise ValueError("PDF processing requires GEMINI_API_KEY — set it in backend/.env")
+    gemini_result = _extract_pdf_with_gemini(file_content, filename)
+    records = _gemini_result_to_records(gemini_result, metadata, filename)
+    if not records:
+        raise ValueError("Gemini could not extract any data from this PDF")
+    return records
+
+
+def _gemini_result_to_records(gemini_result: dict, metadata, filename: str) -> list:
+    """Convert Gemini JSON response to list of record dicts."""
+    rows = gemini_result.get('rows', [])
+    if not rows:
+        return []
+
+    # Override metadata with PDF-extracted values
+    meta = metadata.copy()
+    if gemini_result.get('subject_id'):
+        meta['subject_id'] = str(gemini_result['subject_id'])
+    if gemini_result.get('collection_date'):
+        meta['timepoint'] = str(gemini_result['collection_date'])
+    elif meta.get('timepoint') in ('Unknown_Timepoint', None, ''):
+        meta['timepoint'] = 'Baseline'
+
+    records = []
+    for i, row in enumerate(rows):
+        parameter = str(row.get('parameter') or '').strip()
+        if not parameter:
+            continue
+        result = row.get('result')
+        records.append(_build_pdf_record({
+            'test_no': i + 1,
+            'parameter': parameter,
+            'flag': str(row.get('flag') or ''),
+            'result': float(result) if result is not None else None,
+            'unit': str(row.get('unit') or ''),
+            'ref_range': str(row.get('ref_range') or ''),
+        }, meta, filename))
+
+    return records
+
+
+def _build_pdf_record(measurements, metadata, filename):
+    """Flat record with metadata + actual measurements — no DEXA zero-fill."""
+    record = {
+        'batch': metadata.get('batch', 'unknown_batch'),
+        'subject_id': metadata.get('subject_id', 'unknown'),
+        'timepoint': metadata.get('timepoint', 'Unknown_Timepoint'),
+        'filename': filename,
+    }
+    record.update(measurements)
+    return record
 
 def parse_image_file(file_content, filename, metadata):
     """Parse image files and extract metadata."""
@@ -843,8 +944,8 @@ def process_dexa_files_enhanced():
                     error_msg = "Excel format not supported. Please convert to .xlsx or .csv"
                 elif "unicode" in error_msg.lower():
                     error_msg = "File encoding not supported. Please save as UTF-8"
-                elif "pdf" in error_msg.lower() and not PDF_SUPPORT:
-                    error_msg = "PDF processing not available. Please convert to text format"
+                elif "pdf" in error_msg.lower() and not GEMINI_SUPPORT:
+                    error_msg = "PDF processing not available. Please set GEMINI_API_KEY in backend/.env"
                 
                 processing_errors.append(f"{file.filename}: {error_msg}")
                 app.logger.warning(f"Failed to process {file.filename}: {e}")
@@ -860,67 +961,112 @@ def process_dexa_files_enhanced():
             }), 400
         
         print(f"Total records extracted: {len(all_data)}")
-        
-        # Create DataFrame and apply enhanced processing
-        df = pd.DataFrame(all_data)
-        
-        # Enhanced data cleaning
-        print("Starting enhanced data cleaning...")
-        cleaned_df = clean_dexa_data_enhanced(df)
-        
-        # Smart imputation with configurable strategy
-        imputation_strategy = request.form.get('imputation_strategy', 'group_median')
-        base_fields = ['total_weight', 'soft_weight', 'lean_weight', 'fat_weight',
-                       'fat_percent', 'bmc', 'bmd', 'bone_area', 'sample_area']
-        measurement_fields = [
-            col for col in cleaned_df.columns
-            if any(col == f'{prefix}{base}'
-                   for prefix in ('roi_', 'whole_')
-                   for base in base_fields)
-        ]
-        
-        print("Starting smart missing data imputation...")
-        imputed_df = smart_impute_missing_data_enhanced(cleaned_df, measurement_fields, strategy=imputation_strategy)
-        
-        # Timepoint standardization
-        print("Standardizing timepoints...")
-        standardized_df = standardize_timepoints(imputed_df)
-        
-        # Enhanced duplicate removal
-        print("Removing duplicates...")
-        original_count = len(standardized_df)
-        standardized_df = standardized_df.drop_duplicates()
-        duplicates_removed = original_count - len(standardized_df)
-        
+
+        # Split PDF/hematology records from DEXA records
+        # PDF records always have a 'parameter' field; DEXA records never do
+        pdf_records = [r for r in all_data if 'parameter' in r]
+        dexa_data = [r for r in all_data if 'parameter' not in r]
+        upload_mode = request.form.get('upload_mode', 'dexa')
+        if pdf_records:
+            print(f"  {len(pdf_records)} hematology (PDF) records, {len(dexa_data)} DEXA records")
+
         # Generate session_id for this processing run
         session_id = str(uuid.uuid4())
 
-        # Ensure all subjects exist in subject_grouping before inserting dexa_records (FK constraint)
-        if supabase_client is not None:
-            try:
-                unique_subjects = [{'subject_id': sid} for sid in standardized_df['subject_id'].dropna().unique()]
-                for i in range(0, len(unique_subjects), 100):
-                    supabase_client.table('subject_grouping').upsert(unique_subjects[i:i+100], on_conflict='subject_id').execute()
-                print(f"Upserted {len(unique_subjects)} subjects into subject_grouping.")
-            except Exception as e:
-                print(f"subject_grouping upsert failed: {e}")
+        # --- DEXA pipeline (only when there are DEXA records) ---
+        standardized_df = pd.DataFrame()
+        cleaned_df = pd.DataFrame()
+        imputed_df = pd.DataFrame()
+        duplicates_removed = 0
+        imputation_strategy = request.form.get('imputation_strategy', 'group_median')
 
-        # Save records to Supabase dexa_records
-        if supabase_client is not None:
+        if dexa_data:
+            df = pd.DataFrame(dexa_data)
+
+            # Enhanced data cleaning
+            print("Starting enhanced data cleaning...")
+            cleaned_df = clean_dexa_data_enhanced(df)
+
+            # Smart imputation with configurable strategy
+            base_fields = ['total_weight', 'soft_weight', 'lean_weight', 'fat_weight',
+                           'fat_percent', 'bmc', 'bmd', 'bone_area', 'sample_area']
+            measurement_fields = [
+                col for col in cleaned_df.columns
+                if any(col == f'{prefix}{base}'
+                       for prefix in ('roi_', 'whole_')
+                       for base in base_fields)
+            ]
+
+            print("Starting smart missing data imputation...")
+            imputed_df = smart_impute_missing_data_enhanced(cleaned_df, measurement_fields, strategy=imputation_strategy)
+
+            # Timepoint standardization
+            print("Standardizing timepoints...")
+            standardized_df = standardize_timepoints(imputed_df)
+
+            # Enhanced duplicate removal
+            print("Removing duplicates...")
+            original_count = len(standardized_df)
+            standardized_df = standardized_df.drop_duplicates()
+            duplicates_removed = original_count - len(standardized_df)
+
+            # Ensure all subjects exist in subject_grouping before inserting dexa_records (FK constraint)
+            if supabase_client is not None:
+                try:
+                    unique_subjects = [{'subject_id': sid} for sid in standardized_df['subject_id'].dropna().unique()]
+                    for i in range(0, len(unique_subjects), 100):
+                        supabase_client.table('subject_grouping').upsert(unique_subjects[i:i+100], on_conflict='subject_id').execute()
+                    print(f"Upserted {len(unique_subjects)} subjects into subject_grouping.")
+                except Exception as e:
+                    print(f"subject_grouping upsert failed: {e}")
+
+            # Save records to Supabase dexa_records
+            if supabase_client is not None:
+                try:
+                    import math
+                    _DEXA_RECORD_COLS = {
+                        'session_id', 'batch', 'subject_id', 'timepoint', 'filename',
+                        'has_image_data', 'gender', 'genotype', 'age', 'image_path',
+                        'total_weight', 'soft_weight', 'lean_weight', 'fat_weight',
+                        'fat_percent', 'bmc', 'bmd', 'bone_area', 'sample_area',
+                        'roi_bmd', 'whole_bmd', 'roi_bone_area', 'whole_bone_area',
+                        'roi_bmc', 'whole_bmc', 'roi_fat_percent', 'whole_fat_percent',
+                        'roi_total_weight', 'whole_total_weight', 'roi_lean_weight',
+                        'whole_lean_weight', 'roi_fat_weight', 'whole_fat_weight',
+                        'roi_soft_weight', 'whole_soft_weight',
+                    }
+                    records = standardized_df.where(pd.notnull(standardized_df), None).to_dict(orient='records')
+                    for r in records:
+                        r['session_id'] = session_id
+                        for k, v in list(r.items()):
+                            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                                r[k] = None
+                    records = [{k: v for k, v in r.items() if k in _DEXA_RECORD_COLS} for r in records]
+                    chunk_size = 100
+                    for i in range(0, len(records), chunk_size):
+                        supabase_client.table('dexa_records').insert(records[i:i+chunk_size]).execute()
+                    print(f"Saved {len(records)} records to dexa_records with session_id {session_id}.")
+                except Exception as e:
+                    app.logger.warning(f"Supabase dexa_records insert failed (non-critical): {e}")
+
+        # --- Save hematology records to hematology_records table ---
+        if supabase_client is not None and pdf_records:
             try:
-                records = standardized_df.where(pd.notnull(standardized_df), None).to_dict(orient='records')
-                for r in records:
+                _HEMA_COLS = {
+                    'session_id', 'batch', 'subject_id', 'timepoint', 'filename',
+                    'test_no', 'parameter', 'flag', 'result', 'unit', 'ref_range',
+                }
+                hema_rows = [{k: v for k, v in r.items() if k in _HEMA_COLS} for r in pdf_records]
+                for r in hema_rows:
                     r['session_id'] = session_id
-                chunk_size = 100
-                for i in range(0, len(records), chunk_size):
-                    supabase_client.table('dexa_records').insert(records[i:i+chunk_size]).execute()
-                print(f"Saved {len(records)} records to dexa_records with session_id {session_id}.")
+                for i in range(0, len(hema_rows), 100):
+                    supabase_client.table('hematology_records').insert(hema_rows[i:i+100]).execute()
+                print(f"Saved {len(hema_rows)} hematology records to hematology_records.")
             except Exception as e:
-                print(f"Supabase dexa_records insert failed: {e}")
-                return jsonify({"status": "error", "error": f"DB insert failed: {str(e)}"}), 500
+                app.logger.warning(f"Supabase hematology_records insert failed (non-critical): {e}")
 
         # Upsert to dexa_bmd — one row per subject, timepoints stored as JSONB in val_at_time
-        if supabase_client is not None:
+        if supabase_client is not None and not standardized_df.empty:
             try:
                 df_clean = standardized_df.where(pd.notnull(standardized_df), None)
                 bmd_rows = {}
@@ -952,21 +1098,28 @@ def process_dexa_files_enhanced():
                 print(f"Supabase dexa_bmd upsert failed: {e}")
 
         print("Enhanced processing complete!")
-        
+
+        # Determine output records for frontend editable table
+        if not standardized_df.empty:
+            output_records = standardized_df.where(standardized_df.notna(), other=None).to_dict(orient='records')
+        else:
+            output_records = pdf_records
+
         # Enhanced response with detailed statistics
         response_data = {
             "status": "success",
             "processing_method": "enhanced_multi_file",
-            "total_records": int(len(standardized_df)),
+            "upload_mode": upload_mode,
+            "total_records": int(len(output_records)),
             "files_uploaded": int(len([f for f in files if f.filename != ''])),
             "files_processed": int(processed_count),
-            "records_before_cleaning": int(len(df)),
-            "records_after_cleaning": int(len(cleaned_df)),
-            "records_after_imputation": int(len(imputed_df)),
-            "final_records": int(len(standardized_df)),
+            "records_before_cleaning": int(len(cleaned_df)) if not cleaned_df.empty else 0,
+            "records_after_cleaning": int(len(cleaned_df)) if not cleaned_df.empty else 0,
+            "records_after_imputation": int(len(imputed_df)) if not imputed_df.empty else 0,
+            "final_records": int(len(output_records)),
             "duplicates_removed": int(duplicates_removed),
-            "batches_processed": int(standardized_df['batch'].nunique()),
-            "timepoints_found": list(standardized_df['timepoint'].unique()),
+            "batches_processed": int(standardized_df['batch'].nunique()) if not standardized_df.empty else (len({r.get('batch') for r in pdf_records if r.get('batch')})),
+            "timepoints_found": list(standardized_df['timepoint'].unique()) if not standardized_df.empty else list({r.get('timepoint') for r in pdf_records if r.get('timepoint')}),
             "file_type_breakdown": file_type_stats,
             "imputation_strategy": imputation_strategy,
             "images_analyzed": int(standardized_df['has_image_data'].sum() if 'has_image_data' in standardized_df.columns else 0),
@@ -974,7 +1127,7 @@ def process_dexa_files_enhanced():
             "supported_formats": SUPPORTED_EXTENSIONS,
             "processing_features": [
                 "Multi-file batch processing",
-                "Flexible file type support", 
+                "Flexible file type support",
                 "Smart missing data imputation",
                 "Automatic data cleaning",
                 "Timepoint standardization",
@@ -1000,7 +1153,19 @@ def process_dexa_files_enhanced():
         
         for key, value in response_data.items():
             response_data[key] = convert_numpy_types(value)
-            
+
+        # Save CSV locally so it can be downloaded without Supabase
+        try:
+            prefix = "HEMA" if upload_mode == "hematology" else "DEXA"
+            csv_filename = f"{prefix}_{session_id[:8]}.csv"
+            csv_path = EXPORTS_FOLDER / csv_filename
+            pd.DataFrame(output_records).to_csv(csv_path, index=False)
+            response_data["csv_filename"] = csv_filename
+            response_data["csv_download_url"] = f"/api/download/{csv_filename}"
+            response_data["records"] = output_records
+        except Exception as e:
+            app.logger.warning(f"Could not save CSV export: {e}")
+
         return jsonify(response_data)
         
     except Exception as e:
@@ -1032,6 +1197,23 @@ def export_csv(session_id):
         return response
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/download/<filename>')
+def download_file(filename):
+    """Serve a processed CSV file from the exports folder."""
+    from flask import send_from_directory
+    safe_name = Path(filename).name  # prevent path traversal
+    file_path = EXPORTS_FOLDER / safe_name
+    if not file_path.exists():
+        return jsonify({"error": "File not found"}), 404
+    return send_from_directory(
+        str(EXPORTS_FOLDER),
+        safe_name,
+        as_attachment=True,
+        download_name=safe_name,
+        mimetype='text/csv'
+    )
 
 
 @app.route('/api/dexa-records')
@@ -1102,7 +1284,7 @@ def health_check():
             "multi_file_processing": True,
             "flexible_file_types": True,
             "smart_imputation": True,
-            "pdf_support": PDF_SUPPORT,
+            "pdf_support": GEMINI_SUPPORT and bool(os.environ.get('GEMINI_API_KEY')),
             "excel_support": EXCEL_SUPPORT
         },
         "supported_formats": SUPPORTED_EXTENSIONS,
@@ -1157,7 +1339,7 @@ if __name__ == '__main__':
     print(f"Supported formats: {', '.join(SUPPORTED_EXTENSIONS)}")
     print(f"Max files per batch: {MAX_FILES_PER_BATCH}")
     print(f"Max file size: {MAX_FILE_SIZE_MB}MB")
-    print(f"PDF support: {'Available' if PDF_SUPPORT else 'Not Available'}")
+    print(f"PDF support: {'Available (Gemini)' if GEMINI_SUPPORT and os.environ.get('GEMINI_API_KEY') else 'Not Available'}")
     print(f"Excel support: {'Available' if EXCEL_SUPPORT else 'Not Available'}")
     print("Features: Multi-file processing, Smart imputation, Enhanced cleaning")
     print("Access at: http://localhost:5001")

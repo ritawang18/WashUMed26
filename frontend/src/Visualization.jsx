@@ -46,7 +46,7 @@ export default function Visualization() {
         fetch('/api/dexa-records')
             .then(r => r.json())
             .then(data => {
-                if (!data || data.length === 0) throw new Error('No records found in database.');
+                if (!Array.isArray(data) || data.length === 0) throw new Error('No records found in database.');
                 data.forEach((d, i) => {
                     Object.keys(d).forEach(k => {
                         const val = parseFloat(d[k]);
