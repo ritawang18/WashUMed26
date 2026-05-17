@@ -81,6 +81,106 @@ MAX_FILES_PER_BATCH = 50
 MAX_FILE_SIZE_MB = 50
 SUPPORTED_EXTENSIONS = ['.txt', '.csv', '.xlsx', '.xls', '.pdf', '.tif', '.tiff', '.png', '.jpeg', '.jpg', '.img', '.pxl', '.bmp']
 
+# Hemovat parsing schema
+HEMOVAT_REVIEW_COLUMNS = [
+    "Patient",
+    "Owner Last Name",
+    "Gender",
+    "Sample ID",
+    "Species",
+    "Patient ID",
+    "Mode",
+    "Age",
+    "Parameter",
+    "Result",
+    "Unit",
+    "Ref. Ranges",
+    "Delivery Time",
+    "Draw Time",
+    "Time of Analysis",
+    "Time of Printing",
+    "Operator",
+    "Veterinarian",
+    "Comments",
+]
+
+
+# ---------------------------------------------------------------------------
+# User scoping helpers for the multi-user schema
+# ---------------------------------------------------------------------------
+def get_current_user_id(required=True):
+    """Resolve the current user id from header, form body, query string, JSON, or DEV_USER_ID."""
+    json_body = request.get_json(silent=True) or {}
+    user_id = (
+        request.headers.get('X-User-Id')
+        or request.form.get('user_id')
+        or request.args.get('user_id')
+        or json_body.get('user_id')
+        or os.environ.get('DEV_USER_ID')
+    )
+    if user_id:
+        return str(user_id).strip()
+    return None if required else None
+
+
+def require_user_id():
+    user_id = get_current_user_id(required=True)
+    if not user_id:
+        raise ValueError(
+            "Missing user id. Send user_id in FormData, X-User-Id header, query string, or set DEV_USER_ID in backend/.env."
+        )
+    return user_id
+
+
+def normalize_subject_id(subject_id):
+    return str(subject_id or '').strip()
+
+
+def clean_numeric_nan(record):
+    """Convert NaN/Inf floats to None before Supabase insert/update."""
+    import math
+    cleaned = {}
+    for k, v in record.items():
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            cleaned[k] = None
+        else:
+            cleaned[k] = v
+    return cleaned
+
+
+def upsert_subject_groupings_for_user(user_id, records):
+    """
+    Ensure each uploaded subject has a user-scoped subject_grouping row.
+    Required before inserting dexa_records because dexa_records references
+    subject_grouping(user_id, subject_id).
+    """
+    rows_by_subject = {}
+    for record in records:
+        sid = normalize_subject_id(record.get('subject_id'))
+        if not sid:
+            continue
+
+        row = {
+            'user_id': user_id,
+            'subject_id': sid,
+        }
+
+        if record.get('gender') not in (None, '', 'Unknown'):
+            row['gender'] = record.get('gender')
+        if record.get('genotype') not in (None, '', 'Unknown'):
+            row['genotype'] = record.get('genotype')
+
+        rows_by_subject[sid] = {**rows_by_subject.get(sid, {}), **row}
+
+    rows = list(rows_by_subject.values())
+    if rows:
+        for i in range(0, len(rows), 100):
+            supabase_client.table('subject_grouping').upsert(
+                rows[i:i+100],
+                on_conflict='user_id,subject_id'
+            ).execute()
+    return len(rows)
+
 # Metadata extraction from filename
 def extract_metadata_from_filename(filename):
     """Parse filename in the format '<subject_id> <timepoint>.ext', e.g. '9069 8w.txt'."""
@@ -342,10 +442,10 @@ def parse_excel_file(file_content, filename, metadata):
     except Exception as e:
         raise ValueError(f"Failed to parse Excel file: {str(e)}")
 
-def _extract_pdf_with_gemini(pdf_bytes: bytes, filename: str) -> dict:
+def _extract_hemovat_with_gemini(pdf_bytes: bytes, filename: str) -> dict:
     """
-    Use Gemini API to extract tables from a PDF.
-    Returns dict: {subject_id, collection_date, rows: [{parameter, flag, result, unit, ref_range}]}
+    Use Gemini to extract a Hemovat/CBC report into the new review/edit schema.
+    This function only parses. It does not save to DB.
     """
     gemini_key = os.environ.get('GEMINI_API_KEY')
     if not gemini_key:
@@ -353,28 +453,50 @@ def _extract_pdf_with_gemini(pdf_bytes: bytes, filename: str) -> dict:
 
     client = genai_client.Client(api_key=gemini_key)
 
-    prompt = """Extract ALL data from the table(s) in this document.
+    prompt = """
+Extract the Hemovat / hematology report data from this PDF.
 
-Return ONLY a JSON object with this exact structure (no markdown, no extra text):
+Return ONLY a JSON object. No markdown. No extra explanation.
+
+Use this exact structure:
 {
-  "subject_id": "<patient/sample/animal ID found in the document, or null>",
-  "collection_date": "<collection or report date found in the document, or null>",
+  "metadata": {
+    "Patient": "",
+    "Owner Last Name": "",
+    "Gender": "",
+    "Sample ID": "",
+    "Species": "",
+    "Patient ID": "",
+    "Mode": "",
+    "Age": "",
+    "Delivery Time": "",
+    "Draw Time": "",
+    "Time of Analysis": "",
+    "Time of Printing": "",
+    "Operator": "",
+    "Veterinarian": "",
+    "Comments": ""
+  },
   "rows": [
     {
-      "parameter": "<test/measurement name>",
-      "result": <numeric value as number, or null if missing>,
-      "flag": "<H/L/N/A/C or empty string>",
-      "unit": "<unit string or empty string>",
-      "ref_range": "<reference range string or empty string>"
+      "Parameter": "",
+      "Result": "",
+      "Unit": "",
+      "Ref. Ranges": ""
     }
   ]
 }
 
 Rules:
-- Include every row in the table, even if result is missing
-- result must be a number (float/int), never a string
-- If the document has multiple tables, merge all rows into one "rows" array
-- Do not skip any rows"""
+- Keep empty fields as empty strings.
+- Do not include test_no.
+- Do not include flag.
+- Keep parameter rows in the same order as the PDF table.
+- Result may be a string or number, but preserve the visible value.
+- Ref. Ranges should contain the full reference range text from the PDF.
+- Sample ID is the animal/sample identifier and will become subject_id later.
+- Include every numeric parameter row from the table.
+"""
 
     tmp_path = None
     try:
@@ -392,11 +514,11 @@ Rules:
             model='gemini-2.5-flash',
             contents=[uploaded, prompt]
         )
+
         raw = response.text.strip()
 
-        # Strip markdown code fences if present
         if raw.startswith('```'):
-            raw = re.sub(r'^```[a-z]*\n?', '', raw)
+            raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
             raw = re.sub(r'\n?```$', '', raw)
 
         return json.loads(raw)
@@ -405,16 +527,76 @@ Rules:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
+def _blank_hemovat_review_row():
+    return {col: "" for col in HEMOVAT_REVIEW_COLUMNS}
 
-def parse_pdf_file(file_content, filename, metadata):
-    """Parse PDF files using Gemini API."""
+
+def _clean_str(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _hemovat_gemini_to_review_rows(gemini_result: dict) -> list:
+    """
+    Convert Gemini Hemovat JSON into frontend editable rows.
+    Each parameter row repeats the report-level metadata so the current
+    editable table can display everything in one table.
+    """
+    metadata = gemini_result.get("metadata") or {}
+    rows = gemini_result.get("rows") or []
+
+    review_rows = []
+
+    for row in rows:
+        out = _blank_hemovat_review_row()
+
+        # Report-level fields
+        for col in [
+            "Patient",
+            "Owner Last Name",
+            "Gender",
+            "Sample ID",
+            "Species",
+            "Patient ID",
+            "Mode",
+            "Age",
+            "Delivery Time",
+            "Draw Time",
+            "Time of Analysis",
+            "Time of Printing",
+            "Operator",
+            "Veterinarian",
+            "Comments",
+        ]:
+            out[col] = _clean_str(metadata.get(col))
+
+        # Parameter-level fields
+        out["Parameter"] = _clean_str(row.get("Parameter"))
+        out["Result"] = _clean_str(row.get("Result"))
+        out["Unit"] = _clean_str(row.get("Unit"))
+        out["Ref. Ranges"] = _clean_str(row.get("Ref. Ranges"))
+
+        if out["Parameter"]:
+            review_rows.append(out)
+
+    return review_rows
+
+def parse_hemovat_pdf_for_review(file_content, filename):
+    """
+    Parse a Hemovat PDF into editable review rows.
+    Does not save to database.
+    """
     if not GEMINI_SUPPORT or not os.environ.get('GEMINI_API_KEY'):
-        raise ValueError("PDF processing requires GEMINI_API_KEY — set it in backend/.env")
-    gemini_result = _extract_pdf_with_gemini(file_content, filename)
-    records = _gemini_result_to_records(gemini_result, metadata, filename)
-    if not records:
-        raise ValueError("Gemini could not extract any data from this PDF")
-    return records
+        raise ValueError("Hemovat PDF processing requires GEMINI_API_KEY")
+
+    gemini_result = _extract_hemovat_with_gemini(file_content, filename)
+    rows = _hemovat_gemini_to_review_rows(gemini_result)
+
+    if not rows:
+        raise ValueError("Gemini could not extract Hemovat table rows from this PDF")
+
+    return rows
 
 
 def _gemini_result_to_records(gemini_result: dict, metadata, filename: str) -> list:
@@ -885,6 +1067,11 @@ def process_dexa_files_enhanced():
     Enhanced DEXA file processing with multi-file support and advanced features.
     """
     try:
+        try:
+            user_id = require_user_id()
+        except ValueError as e:
+            return jsonify({"status": "error", "error": str(e)}), 401
+
         files = request.files.getlist('files')
         
         if not files:
@@ -905,6 +1092,51 @@ def process_dexa_files_enhanced():
         file_type_stats = {}
         
         print(f"Starting enhanced batch processing of {len(files)} files...")
+        
+        #direct hemovat files to the hemovat gemini parser
+        upload_mode = request.form.get('upload_mode', 'dexa')
+
+        if upload_mode == "hematology":
+            if 'files' not in request.files:
+                return jsonify({"status": "error", "error": "No files uploaded"}), 400
+
+            files = request.files.getlist('files')
+            files = [f for f in files if f and f.filename]
+
+            if not files:
+                return jsonify({"status": "error", "error": "No files uploaded"}), 400
+
+            if len(files) > 1:
+                return jsonify({
+                    "status": "error",
+                    "error": "Please upload one Hemovat PDF at a time for review/edit/save."
+                }), 400
+
+            file = files[0]
+            filename = file.filename
+            file_content = file.read()
+
+            try:
+                review_rows = parse_hemovat_pdf_for_review(file_content, filename)
+
+                return jsonify({
+                    "status": "parsed",
+                    "upload_mode": "hematology",
+                    "filename": filename,
+                    "batch": "Unknown_Batch",
+                    "total_records": len(review_rows),
+                    "columns": HEMOVAT_REVIEW_COLUMNS,
+                    "records": review_rows,
+                    "message": "Hemovat PDF parsed. Review/edit results, then click Save Parsing Result."
+                })
+
+            except Exception as e:
+                app.logger.exception("Hemovat parsing failed")
+                return jsonify({
+                    "status": "error",
+                    "error": f"Hemovat parsing failed: {str(e)}"
+                }), 500
+
         
         for i, file in enumerate(files):
             if file.filename == '':
@@ -973,6 +1205,21 @@ def process_dexa_files_enhanced():
         # Generate session_id for this processing run
         session_id = str(uuid.uuid4())
 
+        # Save upload session first because records reference (session_id, user_id).
+        if supabase_client is not None:
+            try:
+                supabase_client.table('upload_sessions').insert({
+                    'session_id': session_id,
+                    'user_id': user_id,
+                    'data_type': upload_mode,
+                    'status': 'processing',
+                    'files_uploaded': int(len([f for f in files if f.filename != ''])),
+                    'files_processed': int(processed_count),
+                    'processing_warnings': processing_errors,
+                }).execute()
+            except Exception as e:
+                app.logger.warning(f"upload_sessions insert failed (non-critical): {e}")
+
         # --- DEXA pipeline (only when there are DEXA records) ---
         standardized_df = pd.DataFrame()
         cleaned_df = pd.DataFrame()
@@ -1010,13 +1257,14 @@ def process_dexa_files_enhanced():
             standardized_df = standardized_df.drop_duplicates()
             duplicates_removed = original_count - len(standardized_df)
 
-            # Ensure all subjects exist in subject_grouping before inserting dexa_records (FK constraint)
+            # Ensure all user-scoped subjects exist in subject_grouping before inserting dexa_records (FK constraint)
             if supabase_client is not None:
                 try:
-                    unique_subjects = [{'subject_id': sid} for sid in standardized_df['subject_id'].dropna().unique()]
-                    for i in range(0, len(unique_subjects), 100):
-                        supabase_client.table('subject_grouping').upsert(unique_subjects[i:i+100], on_conflict='subject_id').execute()
-                    print(f"Upserted {len(unique_subjects)} subjects into subject_grouping.")
+                    subject_count = upsert_subject_groupings_for_user(
+                        user_id,
+                        standardized_df.where(pd.notnull(standardized_df), None).to_dict(orient='records')
+                    )
+                    print(f"Upserted {subject_count} user-scoped subjects into subject_grouping.")
                 except Exception as e:
                     print(f"subject_grouping upsert failed: {e}")
 
@@ -1025,7 +1273,7 @@ def process_dexa_files_enhanced():
                 try:
                     import math
                     _DEXA_RECORD_COLS = {
-                        'session_id', 'batch', 'subject_id', 'timepoint', 'filename',
+                        'user_id', 'session_id', 'batch', 'subject_id', 'timepoint', 'filename',
                         'has_image_data', 'gender', 'genotype', 'age', 'image_path',
                         'total_weight', 'soft_weight', 'lean_weight', 'fat_weight',
                         'fat_percent', 'bmc', 'bmd', 'bone_area', 'sample_area',
@@ -1037,11 +1285,10 @@ def process_dexa_files_enhanced():
                     }
                     records = standardized_df.where(pd.notnull(standardized_df), None).to_dict(orient='records')
                     for r in records:
+                        r['user_id'] = user_id
                         r['session_id'] = session_id
-                        for k, v in list(r.items()):
-                            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-                                r[k] = None
-                    records = [{k: v for k, v in r.items() if k in _DEXA_RECORD_COLS} for r in records]
+                        r['subject_id'] = normalize_subject_id(r.get('subject_id'))
+                    records = [clean_numeric_nan({k: v for k, v in r.items() if k in _DEXA_RECORD_COLS}) for r in records]
                     chunk_size = 100
                     for i in range(0, len(records), chunk_size):
                         supabase_client.table('dexa_records').insert(records[i:i+chunk_size]).execute()
@@ -1049,53 +1296,8 @@ def process_dexa_files_enhanced():
                 except Exception as e:
                     app.logger.warning(f"Supabase dexa_records insert failed (non-critical): {e}")
 
-        # --- Save hematology records to hematology_records table ---
-        if supabase_client is not None and pdf_records:
-            try:
-                _HEMA_COLS = {
-                    'session_id', 'batch', 'subject_id', 'timepoint', 'filename',
-                    'test_no', 'parameter', 'flag', 'result', 'unit', 'ref_range',
-                }
-                hema_rows = [{k: v for k, v in r.items() if k in _HEMA_COLS} for r in pdf_records]
-                for r in hema_rows:
-                    r['session_id'] = session_id
-                for i in range(0, len(hema_rows), 100):
-                    supabase_client.table('hematology_records').insert(hema_rows[i:i+100]).execute()
-                print(f"Saved {len(hema_rows)} hematology records to hematology_records.")
-            except Exception as e:
-                app.logger.warning(f"Supabase hematology_records insert failed (non-critical): {e}")
-
-        # Upsert to dexa_bmd — one row per subject, timepoints stored as JSONB in val_at_time
-        if supabase_client is not None and not standardized_df.empty:
-            try:
-                df_clean = standardized_df.where(pd.notnull(standardized_df), None)
-                bmd_rows = {}
-                for _, row in df_clean.iterrows():
-                    sid = str(row.get('subject_id', '')).strip()
-                    if not sid:
-                        continue
-                    timepoint = str(row.get('timepoint', '')).strip()
-                    roi_bmd = row.get('roi_bmd', None)
-                    if sid not in bmd_rows:
-                        bmd_rows[sid] = {
-                            'subject_id': sid,
-                            'genotype': str(row.get('genotype', 'Unknown')) if row.get('genotype') else 'Unknown',
-                            'sex': str(row.get('gender', 'Unknown')) if row.get('gender') else 'Unknown',
-                            'val_at_time': {}
-                        }
-                    if timepoint and roi_bmd is not None:
-                        bmd_rows[sid]['val_at_time'][timepoint] = float(roi_bmd)
-
-                for sid, record in bmd_rows.items():
-                    supabase_client.rpc('upsert_dexa_bmd', {
-                        'p_subject_id': record['subject_id'],
-                        'p_genotype': record['genotype'],
-                        'p_sex': record['sex'],
-                        'p_val_at_time': record['val_at_time']
-                    }).execute()
-                print(f"Upserted {len(bmd_rows)} rows to dexa_bmd.")
-            except Exception as e:
-                print(f"Supabase dexa_bmd upsert failed: {e}")
+        # dexa_bmd table removed. BMD values are stored directly in dexa_records
+        # through roi_bmd / whole_bmd columns, so no separate BMD upsert is needed.
 
         print("Enhanced processing complete!")
 
@@ -1175,27 +1377,350 @@ def process_dexa_files_enhanced():
             "error": f"Processing failed: {str(e)}"
         }), 500
 
+
+def _normalize_hemovat_param_key(label: str) -> str:
+    raw = _clean_str(label)
+
+    mapping = {
+        "WBC": "wbc",
+        "Neu #": "neu_abs",
+        "Lym #": "lym_abs",
+        "Mon #": "mon_abs",
+        "Eos #": "eos_abs",
+        "Bas #": "bas_abs",
+        "Neu %": "neu_pct",
+        "Lym %": "lym_pct",
+        "Mon %": "mon_pct",
+        "Eos %": "eos_pct",
+        "Bas %": "bas_pct",
+        "RBC": "rbc",
+        "HGB": "hgb",
+        "HCT": "hct",
+        "MCV": "mcv",
+        "MCH": "mch",
+        "MCHC": "mchc",
+        "RDW-CV": "rdw_cv",
+        "PLT": "plt",
+        "MPV": "mpv",
+    }
+
+    if raw in mapping:
+        return mapping[raw]
+
+    return (
+        raw.lower()
+        .replace("#", "abs")
+        .replace("%", "pct")
+        .replace("/", "_")
+        .replace("-", "_")
+        .replace(".", "")
+        .replace(" ", "_")
+    )
+
+
+def _to_float_or_none(value):
+    s = _clean_str(value)
+    if not s:
+        return None
+
+    cleaned = re.sub(r"[^0-9.\-]", "", s)
+
+    if cleaned in ("", ".", "-", "-."):
+        return None
+
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+    
+
+@app.route('/api/hematology-reports/save', methods=['POST'])
+def save_hematology_report():
+    if supabase_client is None:
+        return jsonify({"error": "Supabase not connected"}), 503
+
+    data = request.get_json(silent=True) or {}
+
+    user_id = (
+        data.get("user_id")
+        or request.headers.get("X-User-Id")
+        or request.args.get("user_id")
+        or os.environ.get("DEV_USER_ID")
+    )
+
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+
+    rows = data.get("records") or []
+    filename = data.get("filename") or ""
+    batch = data.get("batch") or "Unknown_Batch"
+
+    if not isinstance(rows, list) or not rows:
+        return jsonify({"error": "No parsed hematology rows provided"}), 400
+
+    first = rows[0]
+
+    subject_id = _clean_str(first.get("Sample ID"))
+    if not subject_id:
+        return jsonify({
+            "error": "Sample ID is required because it maps to subject_id"
+        }), 400
+
+    measurements = {}
+
+    for row in rows:
+        parameter = _clean_str(row.get("Parameter"))
+        if not parameter:
+            continue
+
+        key = _normalize_hemovat_param_key(parameter)
+
+        measurements[key] = {
+            "label": parameter,
+            "value": _to_float_or_none(row.get("Result")),
+            "raw_value": _clean_str(row.get("Result")),
+            "unit": _clean_str(row.get("Unit")),
+            "ref_range": _clean_str(row.get("Ref. Ranges")),
+        }
+
+    if not measurements:
+        return jsonify({"error": "No valid measurement rows found"}), 400
+
+    try:
+        # Create upload session only after user explicitly saves.
+        session_insert = {
+            "user_id": user_id,
+            "status": "success",
+            "data_type": "hematology",
+            "files_uploaded": 1,
+            "files_processed": 1,
+            "total_records": len(measurements),
+            "duplicates_removed": 0,
+            "batches_processed": [batch] if batch else [],
+            "timepoints_found": [],
+            "csv_filename": filename,
+            "processing_warnings": [],
+        }
+
+        session_result = (
+            supabase_client
+            .table("upload_sessions")
+            .insert(session_insert)
+            .execute()
+        )
+
+        session_rows = session_result.data or []
+        session_id = session_rows[0]["session_id"] if session_rows else None
+
+        # Ensure subject exists for FK.
+        supabase_client.table("subject_grouping").upsert(
+            {
+                "user_id": user_id,
+                "subject_id": subject_id,
+                "gender": _clean_str(first.get("Gender")),
+            },
+            on_conflict="user_id,subject_id"
+        ).execute()
+
+        report_row = {
+            "user_id": user_id,
+            "session_id": session_id,
+            "batch": batch,
+            "subject_id": subject_id,
+            "timepoint": (
+                _clean_str(first.get("Time of Analysis"))
+                or _clean_str(first.get("Draw Time"))
+                or "Unknown_Timepoint"
+            ),
+            "filename": filename,
+
+            "patient": _clean_str(first.get("Patient")),
+            "owner_last_name": _clean_str(first.get("Owner Last Name")),
+            "gender": _clean_str(first.get("Gender")),
+            "species": _clean_str(first.get("Species")),
+            "patient_id": _clean_str(first.get("Patient ID")),
+            "mode": _clean_str(first.get("Mode")),
+            "age": _clean_str(first.get("Age")),
+
+            "delivery_time": _clean_str(first.get("Delivery Time")),
+            "draw_time": _clean_str(first.get("Draw Time")),
+            "time_of_analysis": _clean_str(first.get("Time of Analysis")),
+            "time_of_printing": _clean_str(first.get("Time of Printing")),
+            "operator": _clean_str(first.get("Operator")),
+            "veterinarian": _clean_str(first.get("Veterinarian")),
+            "comments": _clean_str(first.get("Comments")),
+
+            "measurements": measurements,
+            "messages": {},
+        }
+
+        report_result = (
+            supabase_client
+            .table("hematology_reports")
+            .insert(report_row)
+            .execute()
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Hemovat parsing result saved.",
+            "session_id": session_id,
+            "report": (report_result.data or [None])[0],
+        })
+
+    except Exception as e:
+        app.logger.exception("Failed to save hematology report")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/export-csv/<session_id>')
 def export_csv(session_id):
-    """Generate and return a CSV of dexa_records for a given session."""
+    """Generate and return a CSV for a given upload session.
+
+    Supports:
+    - DEXA sessions from dexa_records
+    - Hematology/Hemovat sessions from hematology_reports
+    """
     try:
         if supabase_client is None:
             return jsonify({"error": "Supabase not connected"}), 503
-        result = supabase_client.table('dexa_records').select('*').eq('session_id', session_id).execute()
-        if not result.data:
-            return jsonify({"error": "No records found for this session"}), 404
-        df = pd.DataFrame(result.data)
+
+        user_id = (
+            request.args.get("user_id")
+            or request.headers.get("X-User-Id")
+            or os.environ.get("DEV_USER_ID")
+        )
+
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
+
+        # First read the session so we know what kind of case this is.
+        session_result = (
+            supabase_client
+            .table("upload_sessions")
+            .select("*")
+            .eq("session_id", session_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+
+        sessions = session_result.data or []
+        if not sessions:
+            return jsonify({"error": "Upload session not found for this user"}), 404
+
+        session_row = sessions[0]
+        data_type = (session_row.get("data_type") or "dexa").lower()
+
+        # -------------------------
+        # DEXA export
+        # -------------------------
+        if data_type == "dexa":
+            result = (
+                supabase_client
+                .table("dexa_records")
+                .select("*")
+                .eq("session_id", session_id)
+                .eq("user_id", user_id)
+                .execute()
+            )
+
+            if not result.data:
+                return jsonify({"error": "No DEXA records found for this session"}), 404
+
+            df = pd.DataFrame(result.data)
+
+            # Optional: put identifying columns first.
+            preferred_cols = [
+                "id",
+                "user_id",
+                "session_id",
+                "batch",
+                "subject_id",
+                "timepoint",
+                "filename",
+            ]
+            ordered_cols = [c for c in preferred_cols if c in df.columns] + [
+                c for c in df.columns if c not in preferred_cols
+            ]
+            df = df[ordered_cols]
+
+            filename = f"DEXA_{session_id[:8]}.csv"
+
+        # -------------------------
+        # Hematology / Hemovat export
+        # -------------------------
+        elif data_type in ("hematology", "hemovat"):
+            result = (
+                supabase_client
+                .table("hematology_reports")
+                .select("*")
+                .eq("session_id", session_id)
+                .eq("user_id", user_id)
+                .execute()
+            )
+
+            if not result.data:
+                return jsonify({"error": "No hematology reports found for this session"}), 404
+
+            rows = []
+
+            for report in result.data:
+                measurements = report.get("measurements") or {}
+
+                # One CSV row per parameter, with report-level metadata repeated.
+                for key, info in measurements.items():
+                    if not isinstance(info, dict):
+                        continue
+
+                    rows.append({
+                        "patient": report.get("patient"),
+                        "owner_last_name": report.get("owner_last_name"),
+                        "gender": report.get("gender"),
+                        "subject_id": report.get("subject_id"),
+                        "species": report.get("species"),
+                        "patient_id": report.get("patient_id"),
+                        "mode": report.get("mode"),
+                        "age": report.get("age"),
+                        "parameter": info.get("label") or key,
+                        "result": info.get("raw_value") or info.get("value"),
+                        "unit": info.get("unit"),
+                        "ref_range": info.get("ref_range"),
+                        "delivery_time": report.get("delivery_time"),
+                        "draw_time": report.get("draw_time"),
+                        "time_of_analysis": report.get("time_of_analysis"),
+                        "time_of_printing": report.get("time_of_printing"),
+                        "operator": report.get("operator"),
+                        "veterinarian": report.get("veterinarian"),
+                        "comments": report.get("comments"),
+                        "filename": report.get("filename"),
+                        "session_id": report.get("session_id"),
+                    })
+
+            if not rows:
+                return jsonify({"error": "No hematology measurement rows found for this session"}), 404
+
+            df = pd.DataFrame(rows)
+            filename = f"Hematology_{session_id[:8]}.csv"
+
+        else:
+            return jsonify({
+                "error": f"Unsupported session data_type: {data_type}"
+            }), 400
+
         csv_buffer = io.StringIO()
         df.to_csv(csv_buffer, index=False)
         csv_buffer.seek(0)
-        response = app.response_class(
+
+        return app.response_class(
             csv_buffer.getvalue(),
-            mimetype='text/csv',
-            headers={'Content-Disposition': f'attachment; filename=DEXA_{session_id[:8]}.csv',
-                     'Access-Control-Allow-Origin': '*'}
+            mimetype="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Access-Control-Allow-Origin": "*",
+            }
         )
-        return response
+
     except Exception as e:
+        app.logger.exception("CSV export failed")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1218,22 +1743,30 @@ def download_file(filename):
 
 @app.route('/api/dexa-records')
 def get_dexa_records():
-    """Return all records from dexa_records table."""
+    """Return all DEXA records for the authenticated user."""
     if supabase_client is None:
         return jsonify({"error": "Supabase not connected"}), 503
     try:
-        result = supabase_client.table('dexa_records').select('*').execute()
+        user_id = get_current_user_id(required=True)
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
+        
+        result = supabase_client.table('dexa_records').select('*').eq('user_id', user_id).execute()
         return jsonify(result.data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/subject-groupings')
 def get_subject_groupings():
-    """Return all subject groupings."""
+    """Return all subject groupings for the authenticated user."""
     if supabase_client is None:
         return jsonify({"error": "Supabase not connected"}), 503
     try:
-        result = supabase_client.table('subject_grouping').select('*').execute()
+        user_id = get_current_user_id(required=True)
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
+        
+        result = supabase_client.table('subject_grouping').select('*').eq('user_id', user_id).execute()
         return jsonify(result.data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1243,33 +1776,242 @@ def upsert_subject_grouping(subject_id):
     """Upsert grouping fields (flag, gender, dob, genotype) for a subject."""
     if supabase_client is None:
         return jsonify({"error": "Supabase not connected"}), 503
+    
+    user_id = get_current_user_id(required=True)
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+    
     data = request.get_json()
     if not data:
         return jsonify({"error": "No data provided"}), 400
     flag = data.get('flag')
     if flag and flag not in ('experiment', 'control'):
         return jsonify({"error": "Invalid flag value"}), 400
-    row = {'subject_id': subject_id}
+    row = {'subject_id': subject_id, 'user_id': user_id}
     for field in ('flag', 'gender', 'dob', 'genotype'):
         if field in data:
             row[field] = data[field]
     try:
-        result = supabase_client.table('subject_grouping').upsert(row).execute()
+        # Check if subject grouping exists for this user
+        existing = supabase_client.table('subject_grouping').select('*').eq('user_id', user_id).eq('subject_id', subject_id).execute()
+        
+        if existing.data:
+            # Update existing record
+            result = supabase_client.table('subject_grouping').update(row).eq('user_id', user_id).eq('subject_id', subject_id).execute()
+        else:
+            # Insert new record
+            result = supabase_client.table('subject_grouping').insert(row).execute()
+        
         return jsonify({"success": True, "data": result.data})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/dexa-records/<record_id>', methods=['PATCH'])
 def update_dexa_record(record_id):
-    """Update a single field (or fields) on a dexa_records row."""
+    """Update a single field (or fields) on a user-owned dexa_records row."""
     if supabase_client is None:
         return jsonify({"error": "Supabase not connected"}), 503
+
+    user_id = get_current_user_id(required=True)
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+
     data = request.get_json()
     if not data:
         return jsonify({"error": "No data provided"}), 400
+
+    # Prevent client-side edits from changing ownership / relational identity.
+    data = {k: v for k, v in data.items() if k not in ('id', 'user_id', 'session_id')}
+    if not data:
+        return jsonify({"error": "No editable fields provided"}), 400
+
     try:
-        result = supabase_client.table('dexa_records').update(data).eq('id', record_id).execute()
+        result = (
+            supabase_client.table('dexa_records')
+            .update(data)
+            .eq('id', record_id)
+            .eq('user_id', user_id)
+            .execute()
+        )
         return jsonify({"success": True, "record": result.data[0] if result.data else {}})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ============================================================================
+# Custom Grouping API Endpoints
+# ============================================================================
+
+# ============================================================================
+# Custom Grouping API Endpoints (Integrated with subject_grouping)
+# ============================================================================
+
+@app.route('/api/custom-groupings', methods=['GET'])
+def get_custom_groupings():
+    """Get all custom groupings for the authenticated user."""
+    if supabase_client is None:
+        return jsonify({"error": "Supabase not connected"}), 503
+    try:
+        user_id = get_current_user_id(required=True)
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
+        
+        result = supabase_client.table('custom_groupings').select('*').eq('user_id', user_id).execute()
+        return jsonify(result.data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/custom-groupings', methods=['POST'])
+def create_custom_grouping():
+    """Create a new custom grouping.
+    
+    Body for range-based:
+    {
+        "name": "High BMD",
+        "grouping_type": "range",
+        "data_type": "dexa",
+        "metric_field": "roi_bmd",
+        "range_min": 0.7,
+        "range_max": 1.2
+    }
+    
+    Body for manual selection:
+    {
+        "name": "Cohort A",
+        "grouping_type": "manual_selection",
+        "data_type": "dexa",
+        "selected_subjects": ["subj001", "subj042", "subj089"]
+    }
+    """
+    if supabase_client is None:
+        return jsonify({"error": "Supabase not connected"}), 503
+    
+    user_id = get_current_user_id(required=True)
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+    
+    # Validate required fields
+    if not data.get('name'):
+        return jsonify({"error": "name is required"}), 400
+    if not data.get('grouping_type') or data['grouping_type'] not in ('range', 'manual_selection'):
+        return jsonify({"error": "grouping_type must be 'range' or 'manual_selection'"}), 400
+    if not data.get('data_type') or data['data_type'] not in ('dexa', 'hemovat'):
+        return jsonify({"error": "data_type must be 'dexa' or 'hemovat'"}), 400
+    
+    # Validate type-specific fields
+    if data['grouping_type'] == 'range':
+        if not data.get('metric_field'):
+            return jsonify({"error": "metric_field is required for range grouping"}), 400
+        if data.get('range_min') is None or data.get('range_max') is None:
+            return jsonify({"error": "range_min and range_max are required for range grouping"}), 400
+    elif data['grouping_type'] == 'manual_selection':
+        if not data.get('selected_subjects') or not isinstance(data.get('selected_subjects'), list):
+            return jsonify({"error": "selected_subjects must be a non-empty list for manual grouping"}), 400
+    
+    grouping_id = str(uuid.uuid4())
+    
+    try:
+        # Determine which subjects belong to this grouping
+        matching_subjects = set()
+        
+        if data['grouping_type'] == 'manual_selection':
+            # Manual: use provided list
+            matching_subjects = set(data['selected_subjects'])
+        else:
+            # Range: query dexa_records to find matches (for dexa data type only)
+            if data['data_type'] == 'dexa':
+                metric_field = data['metric_field']
+                range_min = data.get('range_min')
+                range_max = data.get('range_max')
+                
+                dexa_result = supabase_client.table('dexa_records').select('subject_id, ' + metric_field).eq('user_id', user_id).execute()
+                for record in dexa_result.data:
+                    subject_id = record.get('subject_id')
+                    if subject_id:
+                        val = record.get(metric_field)
+                        if val is not None:
+                            try:
+                                val = float(val)
+                                if range_min <= val <= range_max:
+                                    matching_subjects.add(subject_id)
+                            except (ValueError, TypeError):
+                                pass
+        
+        # Create grouping in custom_groupings table
+        new_grouping = {
+            'id': grouping_id,
+            'user_id': user_id,
+            'name': data['name'],
+            'grouping_type': data['grouping_type'],
+            'data_type': data['data_type'],
+            'metric_field': data.get('metric_field'),
+            'range_min': data.get('range_min'),
+            'range_max': data.get('range_max'),
+        }
+        
+        grouping_result = supabase_client.table('custom_groupings').insert(new_grouping).execute()
+        
+        # Create membership entries in custom_grouping_members
+        members_to_insert = [
+            {
+                'id': str(uuid.uuid4()),
+                'user_id': user_id,
+                'grouping_id': grouping_id,
+                'subject_id': subject_id,
+            }
+            for subject_id in matching_subjects
+        ]
+        
+        if members_to_insert:
+            supabase_client.table('custom_grouping_members').insert(members_to_insert).execute()
+        
+        return jsonify({
+            "success": True,
+            "grouping": new_grouping,
+            "subjects_updated": len(matching_subjects)
+        }), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/custom-groupings/<grouping_id>/members', methods=['GET'])
+def get_grouping_members(grouping_id):
+    """Get all subjects in a custom grouping."""
+    if supabase_client is None:
+        return jsonify({"error": "Supabase not connected"}), 503
+    
+    user_id = get_current_user_id(required=True)
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+    
+    try:
+        result = supabase_client.table('custom_grouping_members').select('subject_id').eq('grouping_id', grouping_id).eq('user_id', user_id).execute()
+        
+        subjects = [row['subject_id'] for row in result.data]
+        return jsonify({"subjects": subjects, "count": len(subjects)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/custom-groupings/<grouping_id>', methods=['DELETE'])
+def delete_custom_grouping(grouping_id):
+    """Delete a custom grouping."""
+    if supabase_client is None:
+        return jsonify({"error": "Supabase not connected"}), 503
+    
+    user_id = get_current_user_id(required=True)
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+    
+    try:
+        # Delete all membership entries
+        supabase_client.table('custom_grouping_members').delete().eq('grouping_id', grouping_id).eq('user_id', user_id).execute()
+        
+        # Delete the grouping itself
+        result = supabase_client.table('custom_groupings').delete().eq('id', grouping_id).eq('user_id', user_id).execute()
+        
+        return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1285,13 +2027,87 @@ def health_check():
             "flexible_file_types": True,
             "smart_imputation": True,
             "pdf_support": GEMINI_SUPPORT and bool(os.environ.get('GEMINI_API_KEY')),
-            "excel_support": EXCEL_SUPPORT
+            "excel_support": EXCEL_SUPPORT,
+            "custom_grouping": True
         },
         "supported_formats": SUPPORTED_EXTENSIONS,
         "max_files_per_batch": MAX_FILES_PER_BATCH,
         "max_file_size_mb": MAX_FILE_SIZE_MB,
         "timestamp": datetime.now().isoformat()
     })
+
+@app.route('/api/cases', methods=['GET'])
+def get_cases():
+    if supabase_client is None:
+        return jsonify({"error": "Supabase not connected"}), 503
+
+    user_id = (
+        request.args.get('user_id')
+        or request.headers.get('X-User-Id')
+        or os.environ.get('DEV_USER_ID')
+    )
+
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+
+    try:
+        sessions_result = (
+            supabase_client
+            .table('upload_sessions')
+            .select('*')
+            .eq('user_id', user_id)
+            .order('created_at', desc=True)
+            .execute()
+        )
+
+        sessions = sessions_result.data or []
+        cases = []
+
+        for s in sessions:
+            session_id = s.get('session_id')
+
+            records_result = (
+                supabase_client
+                .table('dexa_records')
+                .select('subject_id,timepoint,filename')
+                .eq('user_id', user_id)
+                .eq('session_id', session_id)
+                .execute()
+            )
+
+            records = records_result.data or []
+
+            derived_timepoints = sorted({
+                str(r.get('timepoint')).strip()
+                for r in records
+                if r.get('timepoint') not in (None, '', 'Unknown_Timepoint')
+            })
+
+            derived_batches = sorted({
+                str(r.get('batch')).strip()
+                for r in records
+                if r.get('batch') not in (None, '', 'Unknown_Batch')
+            })
+
+            derived_subjects = sorted({
+                str(r.get('subject_id')).strip()
+                for r in records
+                if r.get('subject_id')
+            })
+
+            # Prefer real values derived from dexa_records.
+            # Fall back to upload_sessions fields only if records are empty.
+            s['timepoints_found'] = derived_timepoints or s.get('timepoints_found') or []
+            s['batches_processed'] = derived_batches or s.get('batches_processed') or []
+            s['record_count'] = len(records)
+            s['subject_count'] = len(derived_subjects)
+
+            cases.append(s)
+
+        return jsonify(cases)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/')
 def index():

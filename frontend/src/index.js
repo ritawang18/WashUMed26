@@ -12,6 +12,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState('upload');
   const [, setVizFilename] = useState(null);
+  const [casesRefreshKey, setCasesRefreshKey] = useState(0);
 
   useEffect(() => {
     // Get initial session
@@ -27,6 +28,10 @@ function App() {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  function handleUploadComplete() {
+    setCasesRefreshKey(prev => prev + 1);
+  }
 
   if (loading) return null;
 
@@ -47,7 +52,10 @@ function App() {
           </button>
           <button
             className={view === 'cases' ? 'active' : ''}
-            onClick={() => setView('cases')}
+            onClick={() => {
+              setCasesRefreshKey(prev => prev + 1);
+              setView('cases');
+            }}
           >
             My Cases
           </button>
@@ -64,11 +72,18 @@ function App() {
       </div>
 
       {view === 'visualization' ? (
-        <Visualization />
+        <Visualization session={session} />
       ) : view === 'upload' ? (
-        <DexaUploader session={session} onVisualize={(filename) => { setVizFilename(filename); setView('visualization'); }} />
+        <DexaUploader
+          session={session}
+          onUploadComplete={handleUploadComplete}
+          onVisualize={() => setView('visualization')}
+        />
       ) : (
-        <CasesCanvas session={session} />
+        <CasesCanvas
+          session={session}
+          refreshKey={casesRefreshKey}
+        />
       )}
     </div>
   );

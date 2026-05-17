@@ -2,13 +2,39 @@ import { useState } from 'react';
 import { supabase } from './auth/supabaseClient';
 import './DexaUploader.css';
 
-const DexaUploader = ({ session, onVisualize }) => {
+const DexaUploader = ({ session, onVisualize, onUploadComplete }) => {
     const [uploadMode, setUploadMode] = useState('dexa'); // 'dexa' | 'hematology'
     const [files, setFiles] = useState([]);
     const [processing, setProcessing] = useState(false);
     const [result, setResult] = useState(null);
     const [dragActive, setDragActive] = useState(false);
     const [editableRecords, setEditableRecords] = useState([]);
+    const [parsedUploadMeta, setParsedUploadMeta] = useState(null);
+    const [savingParsedResult, setSavingParsedResult] = useState(false);
+    const [saveStatus, setSaveStatus] = useState(null);
+
+
+    const HEMOVAT_REVIEW_COLUMNS = [
+        'Patient',
+        'Owner Last Name',
+        'Gender',
+        'Sample ID',
+        'Species',
+        'Patient ID',
+        'Mode',
+        'Age',
+        'Parameter',
+        'Result',
+        'Unit',
+        'Ref. Ranges',
+        'Delivery Time',
+        'Draw Time',
+        'Time of Analysis',
+        'Time of Printing',
+        'Operator',
+        'Veterinarian',
+        'Comments',
+    ];
 
     const modeConfig = {
         dexa: {
@@ -60,19 +86,51 @@ const DexaUploader = ({ session, onVisualize }) => {
 
     const processFiles = async () => {
         if (files.length === 0) return;
+
+        if (!session?.user?.id) {
+            setResult({ error: 'User session not found' });
+            return;
+        }
+
         setProcessing(true);
+        setSaveStatus?.(null);
+
         const formData = new FormData();
         files.forEach(file => formData.append('files', file));
         formData.append('upload_mode', uploadMode);
+        formData.append('user_id', session.user.id);
+
+        const endpoint = uploadMode === 'hematology'
+            ? '/api/hematology/parse'
+            : '/api/dexa/process';
 
         try {
-            const response = await fetch('/api/process-dexa', { method: 'POST', body: formData });
-            if (!response.ok) throw new Error('Processing failed');
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'X-User-Id': session.user.id,
+                },
+                body: formData,
+            });
+
             const data = await response.json();
+
+            if (!response.ok || data.error) {
+                throw new Error(data.error || 'Processing failed');
+            }
+
             console.log('Process response:', data);
             setResult(data);
-            if (data.records) setEditableRecords(data.records);
-            if (data.status === 'success') await saveToSupabase(data);
+
+            if (data.records) {
+                setEditableRecords(data.records);
+            }
+
+            // DEXA is saved immediately by backend.
+            // Hemovat is only parsed here; user saves it separately.
+            if (data.status === 'success' && uploadMode === 'dexa') {
+                onUploadComplete?.(data);
+            }
         } catch (error) {
             console.error('Upload failed:', error);
             setResult({ error: error.message });
@@ -81,39 +139,70 @@ const DexaUploader = ({ session, onVisualize }) => {
         }
     };
 
-    const saveToSupabase = async (data) => {
-        if (!session?.user?.id) return;
-        try {
-            const insertPayload = {
-                user_id: session.user.id,
-                status: 'success',
-                files_uploaded: data.files_uploaded,
-                files_processed: data.files_processed,
-                total_records: data.total_records,
-                duplicates_removed: data.duplicates_removed,
-                imputation_strategy: data.imputation_strategy,
-                batches_processed: data.batches_processed,
-                timepoints_found: data.timepoints_found,
-                processing_warnings: data.processing_warnings || null,
-            };
-            if (data.session_id) insertPayload.session_id = data.session_id;
-            const { error } = await supabase.from('upload_sessions').insert(insertPayload).select('session_id').single();
-            if (error) throw error;
-        } catch (err) {
-            console.error('Supabase save failed:', err.message);
-        }
-    };
-
     const resetUploader = () => {
         setFiles([]);
         setResult(null);
         setEditableRecords([]);
+        setParsedUploadMeta(null);
+        setSaveStatus(null);
     };
 
     const handleCellEdit = (rowIdx, col, value) => {
         setEditableRecords(prev =>
             prev.map((r, i) => i === rowIdx ? { ...r, [col]: value } : r)
         );
+    };
+
+    const saveHemovatParsingResult = async () => {
+        if (!session?.user?.id) {
+            setSaveStatus({ type: 'error', message: 'User session not found' });
+            return;
+        }
+
+        if (!editableRecords.length) {
+            setSaveStatus({ type: 'error', message: 'No parsed rows to save' });
+            return;
+        }
+
+        setSavingParsedResult(true);
+        setSaveStatus(null);
+
+        try {
+            const response = await fetch('/api/hematology-reports/save', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-Id': session.user.id,
+                },
+                body: JSON.stringify({
+                    user_id: session.user.id,
+                    filename: parsedUploadMeta?.filename || files[0]?.name || '',
+                    batch: parsedUploadMeta?.batch || 'Unknown_Batch',
+                    records: editableRecords,
+                }),
+            });
+
+            const data = await response.json();
+
+            if (!response.ok || data.error) {
+                throw new Error(data.error || 'Failed to save Hemovat parsing result');
+            }
+
+            setSaveStatus({
+                type: 'success',
+                message: 'Hemovat parsing result saved successfully.',
+            });
+
+            onUploadComplete?.(data);
+        } catch (err) {
+            console.error('Save Hemovat parsing result failed:', err);
+            setSaveStatus({
+                type: 'error',
+                message: err.message,
+            });
+        } finally {
+            setSavingParsedResult(false);
+        }
     };
 
     const downloadEditedCsv = () => {
@@ -141,7 +230,9 @@ const DexaUploader = ({ session, onVisualize }) => {
         onVisualize(filename);
     };
 
-    const columns = editableRecords.length > 0 ? Object.keys(editableRecords[0]) : [];
+    const columns = editableRecords.length > 0
+        ? (uploadMode === 'hematology' ? HEMOVAT_REVIEW_COLUMNS : Object.keys(editableRecords[0]))
+        : [];
 
     return (
         <div className="dexa-uploader">
@@ -250,7 +341,11 @@ const DexaUploader = ({ session, onVisualize }) => {
                                 <div className="editable-table-section">
                                     <div className="editable-table-header">
                                         <h4>📝 Review & Edit Results</h4>
-                                        <small>Click any cell to edit. Changes apply to the downloaded CSV.</small>
+                                        <small>
+                                            {uploadMode === 'hematology'
+                                                ? 'Click any cell to edit, then click Save Parsing Result to save to the database.'
+                                                : 'Click any cell to edit. Changes apply to the downloaded CSV.'}
+                                        </small>
                                     </div>
                                     <div className="editable-table-wrapper">
                                         <table className="editable-table">
@@ -284,18 +379,47 @@ const DexaUploader = ({ session, onVisualize }) => {
                                     📊 Download CSV Dataset
                                 </button>
 
-                                {result.excel_download_url && (
-                                    <a href={result.excel_download_url} download="unified_dexa_analysis.xlsx" className="download-btn secondary">
+                                {uploadMode === 'hematology' && (
+                                    <button
+                                        onClick={saveHemovatParsingResult}
+                                        disabled={savingParsedResult}
+                                        className="download-btn visualization"
+                                    >
+                                        {savingParsedResult ? 'Saving…' : '💾 Save Parsing Result'}
+                                    </button>
+                                )}
+
+                                {result.excel_download_url && uploadMode === 'dexa' && (
+                                    <a
+                                        href={result.excel_download_url}
+                                        download="unified_dexa_analysis.xlsx"
+                                        className="download-btn secondary"
+                                    >
                                         📈 Download Excel Analysis
                                     </a>
                                 )}
 
                                 {result.csv_download_url && uploadMode === 'dexa' && (
-                                    <button onClick={() => goToVisualization(result.csv_download_url)} className="download-btn visualization">
+                                    <button
+                                        onClick={() => goToVisualization(result.csv_download_url)}
+                                        className="download-btn visualization"
+                                    >
                                         📊 View Interactive Visualization
                                     </button>
                                 )}
                             </div>
+
+                            {saveStatus && (
+                                <div
+                                    style={{
+                                        marginTop: 12,
+                                        color: saveStatus.type === 'success' ? '#27ae60' : '#c0392b',
+                                        fontWeight: 600,
+                                    }}
+                                >
+                                    {saveStatus.message}
+                                </div>
+                            )}
 
                             <button onClick={resetUploader} className="new-upload-btn">Process New Files</button>
                         </div>
@@ -344,13 +468,18 @@ const DexaUploader = ({ session, onVisualize }) => {
             {uploadMode === 'hematology' && (
                 <div className="format-preview">
                     <h4>📋 Output Format</h4>
-                    <p>Each PDF row becomes one parameter record:</p>
+                    <p>Each Hemovat PDF is parsed into editable rows, then saved as one hematology report with measurements stored as JSON.</p>
                     <div className="preview-table">
                         <table>
                             <thead>
                                 <tr>
-                                    <th>subject_id</th><th>timepoint</th><th>parameter</th>
-                                    <th>flag</th><th>result</th><th>unit</th><th>ref_range</th>
+                                    <th>Patient</th>
+                                    <th>Sample ID</th>
+                                    <th>Parameter</th>
+                                    <th>Result</th>
+                                    <th>Unit</th>
+                                    <th>Ref. Ranges</th>
+                                    <th>Time of Analysis</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -371,7 +500,8 @@ const DexaUploader = ({ session, onVisualize }) => {
                             <li>Gemini AI extracts tables from scanned PDFs</li>
                             <li>Subject ID pulled from PDF content (not filename)</li>
                             <li>High/Low flags preserved</li>
-                            <li>Saved to separate hematology_records table in Supabase</li>
+                            <li>Review and edit parsed values before saving</li>
+                            <li>Saved as one row in hematology_reports with measurements JSONB</li>
                         </ul>
                     </div>
                 </div>

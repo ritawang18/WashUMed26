@@ -2,29 +2,41 @@ import { useEffect, useState } from 'react';
 import { supabase } from '../auth/supabaseClient';
 import './CasesCanvas.css';
 
-const CasesCanvas = ({ session }) => {
+const CasesCanvas = ({ session, refreshKey }) => {
     const [loading, setLoading] = useState(true);
     const [sessions, setSessions] = useState([]);
     const [error, setError] = useState(null);
 
     useEffect(() => {
         const fetchSessions = async () => {
-            const { data, error } = await supabase
-                .from('upload_sessions')
-                .select('*')
-                .eq('user_id', session.user.id)
-                .order('created_at', { ascending: false });
+            if (!session?.user?.id) return;
 
-            if (error) {
-                setError(error.message);
-            } else {
-                setSessions(data);
+            setLoading(true);
+            setError(null);
+
+            try {
+                const res = await fetch(`/api/cases?user_id=${encodeURIComponent(session.user.id)}`, {
+                    headers: {
+                        'X-User-Id': session.user.id,
+                    },
+                });
+
+                const data = await res.json();
+
+                if (!res.ok || data.error) {
+                    throw new Error(data.error || 'Failed to load cases');
+                }
+
+                setSessions(Array.isArray(data) ? data : []);
+            } catch (err) {
+                setError(err.message);
+            } finally {
+                setLoading(false);
             }
-            setLoading(false);
         };
 
         fetchSessions();
-    }, [session]);
+    }, [session?.user?.id, refreshKey]);
 
     if (loading) {
         return (
@@ -75,8 +87,28 @@ const CasesCanvas = ({ session }) => {
 
 const SessionCard = ({ session: s }) => {
     const date = new Date(s.created_at).toLocaleString();
-    const batches = Array.isArray(s.batches_processed) ? s.batches_processed.join(', ') : (s.batches_processed || '—');
-    const timepoints = Array.isArray(s.timepoints_found) ? s.timepoints_found.join(', ') : (s.timepoints_found || '—');
+
+    const normalizeList = (value) => {
+        if (Array.isArray(value)) {
+            return value.filter(Boolean).join(', ') || '—';
+        }
+
+        if (typeof value === 'string') {
+            try {
+                const parsed = JSON.parse(value);
+                if (Array.isArray(parsed)) {
+                    return parsed.filter(Boolean).join(', ') || '—';
+                }
+            } catch {
+                return value || '—';
+            }
+        }
+
+        return value || '—';
+    };
+
+    const batches = normalizeList(s.batches_processed);
+    const timepoints = normalizeList(s.timepoints_found);
     const warningCount = Array.isArray(s.processing_warnings)
         ? s.processing_warnings.length
         : (s.processing_warnings ? 1 : 0);
@@ -87,7 +119,7 @@ const SessionCard = ({ session: s }) => {
                 <span className="case-date">{date}</span>
                 {s.session_id && (
                     <a
-                        href={`http://localhost:5001/api/export-csv/${s.session_id}`}
+                        href={`http://localhost:5001/api/export-csv/${s.session_id}?user_id=${encodeURIComponent(s.user_id)}`}
                         className="download-chip"
                         download
                     >

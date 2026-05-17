@@ -7,6 +7,7 @@ __pycache__/
 .venv/
 backend/venv/
 backend/temp_uploads/
+backend/config.py
 
 # Node
 node_modules/
