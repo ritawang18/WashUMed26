@@ -138,13 +138,32 @@ def get_hematology_reports(user_id):
 
 
 def flatten_hematology_report(report):
+    """
+    Convert one hematology_reports DB row into one visualization row.
+
+    measurements JSONB:
+      {
+        "wbc": {"label": "WBC", "value": 12.3, "raw_value": "12.3", ...}
+      }
+
+    becomes:
+      {
+        "subject_id": "...",
+        "timepoint": "...",
+        "wbc": 12.3
+      }
+    """
     flat = {
         'id': report.get('id'),
+        'user_id': report.get('user_id'),
+        'session_id': report.get('session_id'),
         'data_type': 'hematology',
+
         'subject_id': report.get('subject_id'),
         'timepoint': report.get('timepoint'),
         'batch': report.get('batch'),
         'filename': report.get('filename'),
+
         'patient': report.get('patient'),
         'owner_last_name': report.get('owner_last_name'),
         'gender': report.get('gender'),
@@ -152,22 +171,153 @@ def flatten_hematology_report(report):
         'patient_id': report.get('patient_id'),
         'mode': report.get('mode'),
         'age': report.get('age'),
+
+        'delivery_time': report.get('delivery_time'),
+        'draw_time': report.get('draw_time'),
+        'time_of_analysis': report.get('time_of_analysis'),
+        'time_of_printing': report.get('time_of_printing'),
+        'operator': report.get('operator'),
+        'veterinarian': report.get('veterinarian'),
+        'comments': report.get('comments'),
     }
+
     meta = {}
+
     for key, info in (report.get('measurements') or {}).items():
         if not isinstance(info, dict):
             continue
+
         value = info.get('value')
-        if isinstance(value, (int, float)):
-            flat[key] = value
+        raw_value = info.get('raw_value')
+
+        if value is not None:
+            try:
+                flat[key] = float(value)
+            except (ValueError, TypeError):
+                pass
+        elif raw_value not in (None, ''):
+            try:
+                flat[key] = float(raw_value)
+            except (ValueError, TypeError):
+                pass
+
         meta[key] = {
             'label': info.get('label'),
             'unit': info.get('unit'),
             'ref_range': info.get('ref_range'),
         }
+
     flat['_measurement_meta'] = meta
     return flat
 
 
 def flatten_hematology_reports_for_visualization(user_id):
     return [flatten_hematology_report(r) for r in get_hematology_reports(user_id)]
+
+def update_hematology_report_field(user_id, report_id, updates):
+    """
+    Update one or more visible fields from the Hemovat side panel.
+
+    Metadata fields are stored as normal columns.
+    Measurement fields are stored inside measurements JSONB.
+    data_type is not editable.
+    """
+    client = require_supabase()
+
+    if not isinstance(updates, dict) or not updates:
+        raise ValueError('No update fields provided')
+
+    result = (
+        client
+        .table('hematology_reports')
+        .select('*')
+        .eq('user_id', user_id)
+        .eq('id', report_id)
+        .execute()
+    )
+
+    rows = result.data or []
+    if not rows:
+        raise ValueError('Hematology report not found')
+
+    report = rows[0]
+
+    blocked_fields = {
+        'id',
+        'user_id',
+        'session_id',
+        'data_type',
+        '_measurement_meta',
+        'created_at',
+        'messages',
+    }
+
+    direct_columns = {
+        'batch',
+        'subject_id',
+        'timepoint',
+        'filename',
+        'patient',
+        'owner_last_name',
+        'gender',
+        'species',
+        'patient_id',
+        'mode',
+        'age',
+        'delivery_time',
+        'draw_time',
+        'time_of_analysis',
+        'time_of_printing',
+        'operator',
+        'veterinarian',
+        'comments',
+    }
+
+    direct_updates = {}
+    measurements = report.get('measurements') or {}
+
+    for field, value in updates.items():
+        if field in blocked_fields:
+            continue
+
+        if field in direct_columns:
+            direct_updates[field] = value
+
+        elif field in measurements and isinstance(measurements[field], dict):
+            numeric_value = to_float_or_none(value)
+
+            measurements[field]['raw_value'] = str(value) if value is not None else ''
+            measurements[field]['value'] = numeric_value
+
+        else:
+            # If it is not a direct DB column and not an existing measurement,
+            # treat it as a new measurement field.
+            numeric_value = to_float_or_none(value)
+
+            measurements[field] = {
+                'label': field,
+                'value': numeric_value,
+                'raw_value': str(value) if value is not None else '',
+                'unit': '',
+                'ref_range': '',
+            }
+
+    update_payload = {
+        **direct_updates,
+        'measurements': measurements,
+    }
+
+    update_result = (
+        client
+        .table('hematology_reports')
+        .update(update_payload)
+        .eq('user_id', user_id)
+        .eq('id', report_id)
+        .execute()
+    )
+
+    updated_rows = update_result.data or []
+    if not updated_rows:
+        return report
+
+    return updated_rows[0]

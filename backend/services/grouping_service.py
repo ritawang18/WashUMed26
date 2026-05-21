@@ -90,6 +90,45 @@ def _matching_subjects_for_range(user_id, data):
                         pass
     return matching_subjects
 
+def validate_subjects_exist_for_user(user_id, subject_ids):
+    """
+    Check whether manually entered subject IDs already exist for this user.
+
+    We validate against subject_grouping because it is the user-scoped subject table
+    populated during DEXA/Hemovat uploads.
+    """
+    client = require_supabase()
+
+    requested_subjects = [
+        str(s).strip()
+        for s in subject_ids
+        if str(s).strip()
+    ]
+
+    if not requested_subjects:
+        raise ValueError('selected_subjects must be a non-empty list for manual grouping')
+
+    result = (
+        client
+        .table('subject_grouping')
+        .select('subject_id')
+        .eq('user_id', user_id)
+        .in_('subject_id', requested_subjects)
+        .execute()
+    )
+
+    existing_subjects = {
+        str(row.get('subject_id')).strip()
+        for row in (result.data or [])
+        if row.get('subject_id')
+    }
+
+    missing_subjects = [
+        sid for sid in requested_subjects
+        if sid not in existing_subjects
+    ]
+
+    return requested_subjects, existing_subjects, missing_subjects
 
 def create_custom_grouping(user_id, data):
     client = require_supabase()
@@ -109,9 +148,24 @@ def create_custom_grouping(user_id, data):
         matching_subjects = _matching_subjects_for_range(user_id, {**data, 'data_type': data_type})
     else:
         selected = data.get('selected_subjects')
+
         if not selected or not isinstance(selected, list):
             raise ValueError('selected_subjects must be a non-empty list for manual grouping')
-        matching_subjects = {str(s).strip() for s in selected if str(s).strip()}
+
+        requested_subjects, existing_subjects, missing_subjects = validate_subjects_exist_for_user(
+            user_id,
+            selected
+        )
+
+        if missing_subjects:
+            return {
+                'success': False,
+                'error': 'subject_not_found',
+                'message': 'Subject not found',
+                'missing_subjects': missing_subjects,
+            }
+
+        matching_subjects = set(existing_subjects)
 
     grouping_id = str(uuid.uuid4())
     new_grouping = {
@@ -131,8 +185,6 @@ def create_custom_grouping(user_id, data):
         for sid in matching_subjects
     ]
     if members:
-        # Ensure subject_grouping rows exist for manual selections too.
-        upsert_subject_groupings_for_user(user_id, [{'subject_id': sid} for sid in matching_subjects])
         client.table('custom_grouping_members').insert(members).execute()
 
     return {'grouping': new_grouping, 'subjects_updated': len(matching_subjects)}

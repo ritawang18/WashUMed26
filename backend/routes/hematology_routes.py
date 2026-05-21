@@ -3,7 +3,7 @@ from flask import Blueprint, jsonify, request
 from config import HEMOVAT_REVIEW_COLUMNS
 from db.supabase_client import supabase_client
 from services.hematology_parser import parse_hemovat_pdf_for_review
-from services.hematology_service import flatten_hematology_reports_for_visualization, save_reviewed_hematology_report
+from services.hematology_service import flatten_hematology_reports_for_visualization, save_reviewed_hematology_report, update_hematology_report_field
 from utils.auth import require_user_id, get_current_user_id
 
 
@@ -57,14 +57,43 @@ def save_hematology_report_route():
         return jsonify({'error': str(e)}), 500
 
 
-@hematology_bp.route('/hematology/reports')
+@hematology_bp.route('/hematology/reports', methods=['GET'])
 def get_hematology_reports_route():
     if supabase_client is None:
         return jsonify({'error': 'Supabase not connected'}), 503
+
     try:
-        user_id = get_current_user_id(required=True)
-        if not user_id:
-            return jsonify({'error': 'user_id is required'}), 400
-        return jsonify(flatten_hematology_reports_for_visualization(user_id))
+        user_id = require_user_id()
+        rows = flatten_hematology_reports_for_visualization(user_id)
+        return jsonify(rows)
+
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@hematology_bp.route('/hematology/reports/<report_id>', methods=['PATCH'])
+def update_hematology_report_route(report_id):
+    if supabase_client is None:
+        return jsonify({'error': 'Supabase not connected'}), 503
+
+    try:
+        user_id = require_user_id()
+        data = request.get_json(silent=True) or {}
+
+        if not data:
+            return jsonify({'error': 'No update fields provided'}), 400
+
+        updated = update_hematology_report_field(user_id, report_id, data)
+
+        return jsonify({
+            'success': True,
+            'report': updated
+        })
+
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500

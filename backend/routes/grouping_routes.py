@@ -62,15 +62,29 @@ def get_custom_groupings_route():
 def create_custom_grouping_route():
     if supabase_client is None:
         return jsonify({'error': 'Supabase not connected'}), 503
+
     try:
         user_id = require_user_id()
         data = request.get_json() or {}
+
         if not data:
             return jsonify({'error': 'No data provided'}), 400
+
         result = create_custom_grouping(user_id, data)
-        return jsonify({'success': True, 'grouping': result['grouping'], 'subjects_updated': result['subjects_updated']}), 201
+
+        if result.get('success') is False:
+            status_code = 404 if result.get('error') == 'subject_not_found' else 400
+            return jsonify(result), status_code
+
+        return jsonify({
+            'success': True,
+            'grouping': result['grouping'],
+            'subjects_updated': result['subjects_updated']
+        }), 201
+
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
